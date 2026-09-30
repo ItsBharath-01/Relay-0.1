@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Local environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# Runtime databases (not for version control)
+backend/*.db
+backend/relay.db
+
+# Scratch/temp test files
+backend/test_*.py
+!backend/tests/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
+frontend/coverage/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets / keys (belt-and-suspenders)
+*.pem
+*.key
+*.p12
+*.pfx
+client_secrets.json
+service_account.json

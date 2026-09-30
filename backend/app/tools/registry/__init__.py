@@ -6,6 +6,10 @@ from app.tools.adapters.browser import PlaywrightBrowserTool
 from app.tools.adapters.google_calendar import GoogleCalendarTool
 from app.tools.adapters.gmail import GmailTool
 from app.tools.adapters.mcp_adapter import MCPToolAdapter
+from app.tools.adapters.github import GitHubTool
+from app.tools.adapters.slack import SlackTool
+from app.tools.adapters.rest import RestApiTool
+from app.tools.adapters.filesystem import LocalFilesystemTool
 
 ALL_TOOLS: List[BaseTool] = [
     WebSearchTool(),
@@ -14,6 +18,10 @@ ALL_TOOLS: List[BaseTool] = [
     GoogleCalendarTool(),
     GmailTool(),
     MCPToolAdapter(),
+    GitHubTool(),
+    SlackTool(),
+    RestApiTool(),
+    LocalFilesystemTool(),
 ]
 
 TOOL_MAP: Dict[str, BaseTool] = {tool.id: tool for tool in ALL_TOOLS}
