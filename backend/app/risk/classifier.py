@@ -27,16 +27,17 @@ class RiskClassifier:
         prefs = preferences or UserPreference()
         p_hash = hash_payload(params)
 
-        # Rule 1: Deletion of data / calendar / emails
-        if "delete" in capability_id or "delete" in action:
+        # Rule 1: Deletion or destructive wiping of data / calendar / emails / resources
+        if any(w in capability_id.lower() or w in action.lower() for w in ["delete", "remove", "wipe", "drop", "destroy", "purge", "terminate"]):
             req_app = True if prefs.ask_deleting is None else bool(prefs.ask_deleting)
-            target = params.get("event_id") or params.get("id") or "specified resource"
+            target = params.get("event_id") or params.get("id") or params.get("note_id") or ("all stored data" if "wipe" in action.lower() else "specified resource")
+            level = "critical" if any(w in action.lower() for w in ["wipe", "destroy", "purge", "drop"]) else "high"
             return RiskAssessment(
-                risk_level="high",
-                requires_approval=req_app,
-                reason="This action will permanently delete an existing item or calendar appointment.",
+                risk_level=level,
+                requires_approval=True if level == "critical" else req_app,
+                reason="This action will permanently delete or wipe stored items or records.",
                 target=str(target),
-                consequences="The item will be removed from your account.",
+                consequences="The item(s) will be permanently removed.",
                 payload_hash=p_hash
             )
 

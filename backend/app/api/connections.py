@@ -397,7 +397,7 @@ async def register_mcp_server(
 
     # Health check server before saving
     adapter = _MCPAdapter()
-    healthy, health_msg = await adapter.health_check(credentials=req.url or norm_config)
+    healthy, health_msg = await adapter.health_check(credentials=norm_config)
     if not healthy:
         raise HTTPException(
             status_code=400,

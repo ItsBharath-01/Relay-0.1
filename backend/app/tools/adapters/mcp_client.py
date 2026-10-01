@@ -2,32 +2,43 @@
 mcp_client.py — Official Model Context Protocol (MCP) Client Adapter for Relay.
 
 Provides robust integration with MCP servers over:
-1. Streamable HTTP / SSE transport (MCP spec 2024-11-05+)
-2. Stdio transport (local subprocess via StdioServerParameters)
-3. HTTP fallback transport for legacy servers
+1. Streamable HTTP transport (MCP spec 2024-11-05+)
+2. SSE transport
+3. Stdio transport (local subprocess via StdioServerParameters)
 
-Uses official Python MCP SDK (mcp.client).
+Maintains active session persistence using the official MCP Python SDK:
+- Establishes sessions via official StreamableHTTPTransport and ClientSession
+- Captures the server-provided session ID
+- Preserves the session across list_tools(), tool calls, and health checks
+- Recovers and reconnects when sessions expire
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import shlex
 import sys
+import time
 import uuid
 from typing import Dict, Any, Optional, Tuple, List
 from urllib.parse import urlparse
 
 import httpx
 
+import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 try:
-    from mcp.client.streamable_http import streamable_http_client
+    from mcp.client.streamable_http import StreamableHTTPTransport, streamable_http_client
+    from mcp.shared._compat import resync_tracer
+    from mcp.shared._context_streams import create_context_streams
+    from mcp.shared._httpx_utils import create_mcp_http_client
 except ImportError:
+    StreamableHTTPTransport = None
     streamable_http_client = None
 
 logger = logging.getLogger(__name__)
@@ -156,332 +167,8 @@ def validate_mcp_config(config: Dict[str, Any]) -> None:
         raise ValueError(f"Unsupported MCP transport '{transport}'. Supported: streamable_http, sse, stdio.")
 
 
-class MCPClient:
-    """
-    Production-grade MCP Client managing connections, discovery, and tool execution
-    using official MCP SDK protocols and robust fallbacks.
-    """
-
-    async def health_check(self, credentials: Any) -> Tuple[bool, Dict[str, Any]]:
-        """
-        Runs comprehensive health check:
-        1. Connects to server
-        2. Initializes session
-        3. Discovers tools
-        Returns (is_healthy, structured_health_dict)
-        """
-        try:
-            config = parse_mcp_config(credentials)
-            validate_mcp_config(config)
-        except Exception as e:
-            return False, {
-                "status": "unavailable",
-                "message": f"Configuration error: {str(e)}",
-                "tool_count": 0,
-                "transport": "unknown",
-            }
-
-        transport = config["transport"]
-        timeout = min(config.get("timeout", 10.0), 15.0)
-
-        try:
-            async def _check():
-                tools = await self.list_tools(config)
-                return tools
-
-            tools = await asyncio.wait_for(_check(), timeout=timeout)
-            return True, {
-                "status": "healthy",
-                "server": config.get("server_url") or config.get("command"),
-                "transport": transport,
-                "tool_count": len(tools),
-                "message": f"Connected to MCP server ({len(tools)} tools discovered).",
-            }
-        except asyncio.TimeoutError:
-            return False, {
-                "status": "degraded",
-                "transport": transport,
-                "tool_count": 0,
-                "message": f"MCP server health check timed out after {timeout}s.",
-            }
-        except Exception as exc:
-            return False, {
-                "status": "unavailable",
-                "transport": transport,
-                "tool_count": 0,
-                "message": f"MCP connection failed: {str(exc)}",
-            }
-
-    async def list_tools(self, credentials: Any) -> List[Dict[str, Any]]:
-        """
-        Connects, initializes, and retrieves tools list from MCP server.
-        Returns list of {"name": str, "description": str, "input_schema": dict}.
-        """
-        config = parse_mcp_config(credentials)
-        validate_mcp_config(config)
-        transport = config["transport"]
-
-        if transport == "stdio":
-            return await self._list_tools_stdio(config)
-        else:
-            return await self._list_tools_http(config)
-
-    async def call_tool(
-        self,
-        credentials: Any,
-        tool_name: str,
-        arguments: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Executes tools/call on the MCP server with validated parameters.
-        Returns real output bounded at MAX_CONTENT_CHARS.
-        """
-        config = parse_mcp_config(credentials)
-        validate_mcp_config(config)
-
-        tool_name = str(tool_name).strip()
-        if not tool_name or len(tool_name) > MAX_TOOL_NAME_LEN:
-            raise ValueError(f"Invalid tool_name length for MCP call.")
-
-        sanitized_args = _sanitize_arguments(arguments or {})
-
-        transport = config["transport"]
-        if transport == "stdio":
-            return await self._call_tool_stdio(config, tool_name, sanitized_args)
-        else:
-            return await self._call_tool_http(config, tool_name, sanitized_args)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Stdio Transport Implementations
-    # ─────────────────────────────────────────────────────────────────────────
-
-    async def _list_tools_stdio(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
-        cmd = config["command"]
-        args = config.get("args", [])
-        env = dict(os.environ)
-        env.update(config.get("env", {}))
-
-        params = StdioServerParameters(command=cmd, args=args, env=env)
-        try:
-            async with stdio_client(params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    res = await session.list_tools()
-                    tools = []
-                    for t in res.tools:
-                        input_schema = getattr(t, "input_schema", None) or getattr(t, "inputSchema", {})
-                        if hasattr(input_schema, "model_dump"):
-                            input_schema = input_schema.model_dump()
-                        elif not isinstance(input_schema, dict):
-                            input_schema = dict(input_schema) if input_schema else {}
-                        tools.append({
-                            "name": t.name,
-                            "description": t.description or "",
-                            "input_schema": input_schema,
-                        })
-                    return tools
-        except Exception as e:
-            raise MCPConnectionError(f"Failed to list tools via stdio transport: {str(e)}") from e
-
-    async def _call_tool_stdio(
-        self, config: Dict[str, Any], tool_name: str, arguments: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        cmd = config["command"]
-        args = config.get("args", [])
-        env = dict(os.environ)
-        env.update(config.get("env", {}))
-
-        timeout = float(config.get("timeout", MCP_TIMEOUT_SECONDS))
-
-        async def _run():
-            params = StdioServerParameters(command=cmd, args=args, env=env)
-            async with stdio_client(params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    result = await session.call_tool(tool_name, arguments)
-                    
-                    # Process content
-                    content_blocks = []
-                    raw_text_parts = []
-                    for block in result.content:
-                        b_type = getattr(block, "type", "text")
-                        b_text = getattr(block, "text", "")
-                        content_blocks.append({"type": b_type, "text": b_text})
-                        if b_text:
-                            raw_text_parts.append(b_text)
-
-                    raw_text = "\n".join(raw_text_parts).strip()
-                    if len(raw_text) > MAX_CONTENT_CHARS:
-                        raw_text = raw_text[:MAX_CONTENT_CHARS] + "\n... [TRUNCATED]"
-
-                    structured_data = getattr(result, "structured_content", None)
-                    is_error = getattr(result, "is_error", False)
-
-                    return {
-                        "status": "error" if is_error else "success",
-                        "tool_name": tool_name,
-                        "arguments": arguments,
-                        "content": content_blocks,
-                        "raw_text": raw_text,
-                        "data": structured_data,
-                        "is_error": is_error,
-                    }
-
-        try:
-            return await asyncio.wait_for(_run(), timeout=timeout)
-        except (asyncio.TimeoutError, TimeoutError) as e:
-            raise MCPTimeoutError(f"MCP stdio execution timed out after {timeout}s") from e
-        except (FileNotFoundError, OSError, ConnectionRefusedError) as e:
-            raise MCPConnectionError(f"Error connecting to MCP stdio server '{cmd}': {str(e)}") from e
-        except (MCPTimeoutError, MCPConnectionError):
-            raise
-        except Exception as e:
-            raise MCPProtocolError(f"Error executing MCP stdio tool '{tool_name}': {str(e)}") from e
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # HTTP / SSE Transport Implementations
-    # ─────────────────────────────────────────────────────────────────────────
-
-    async def _list_tools_http(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
-        server_url = config["server_url"]
-        headers = config.get("headers", {})
-
-        # Try official SDK streamable_http_client if available
-        if streamable_http_client:
-            try:
-                endpoint = f"{server_url}/mcp" if not server_url.endswith("/mcp") else server_url
-                async with streamable_http_client(endpoint, headers=headers) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        res = await session.list_tools()
-                        tools = []
-                        for t in res.tools:
-                            schema = getattr(t, "input_schema", None) or getattr(t, "inputSchema", {})
-                            if hasattr(schema, "model_dump"):
-                                schema = schema.model_dump()
-                            tools.append({
-                                "name": t.name,
-                                "description": t.description or "",
-                                "input_schema": schema if isinstance(schema, dict) else {},
-                            })
-                        return tools
-            except Exception as e:
-                logger.debug(f"streamable_http_client list_tools failed: {e}. Trying fallback.")
-
-        # HTTP JSON-RPC POST /mcp fallback
-        req_id = str(uuid.uuid4())
-        payload = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": "tools/list",
-            "params": {}
-        }
-        all_headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "Mcp-Session-Id": req_id,
-            **headers
-        }
-
-        async with httpx.AsyncClient(timeout=config.get("timeout", MCP_TIMEOUT_SECONDS)) as client:
-            target_url = f"{server_url}/mcp" if not server_url.endswith("/mcp") else server_url
-            try:
-                resp = await client.post(target_url, json=payload, headers=all_headers)
-                if resp.status_code == 200:
-                    data = _parse_jsonrpc_response(resp.text)
-                    if "result" in data and "tools" in data["result"]:
-                        return data["result"]["tools"]
-            except Exception:
-                pass
-
-            # Legacy SSE fallback: GET /sse or POST /tools/list
-            try:
-                sse_url = f"{server_url}/sse"
-                resp_sse = await client.get(sse_url, timeout=5.0, headers={"Accept": "text/event-stream"})
-                if resp_sse.status_code == 200:
-                    return [{"name": "mcp_call", "description": "Legacy SSE MCP Server", "input_schema": {}}]
-            except Exception:
-                pass
-
-        raise MCPConnectionError(f"Could not connect or list tools from MCP server at {server_url}")
-
-    async def _call_tool_http(
-        self, config: Dict[str, Any], tool_name: str, arguments: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        server_url = config["server_url"]
-        headers = config.get("headers", {})
-
-        # Try official SDK streamable_http_client if available
-        if streamable_http_client:
-            try:
-                endpoint = f"{server_url}/mcp" if not server_url.endswith("/mcp") else server_url
-                async with streamable_http_client(endpoint, headers=headers) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        result = await session.call_tool(tool_name, arguments)
-                        raw_parts = [getattr(b, "text", "") for b in result.content if getattr(b, "text", "")]
-                        raw_text = "\n".join(raw_parts)
-                        if len(raw_text) > MAX_CONTENT_CHARS:
-                            raw_text = raw_text[:MAX_CONTENT_CHARS] + "\n... [TRUNCATED]"
-                        return {
-                            "status": "error" if getattr(result, "is_error", False) else "success",
-                            "tool_name": tool_name,
-                            "arguments": arguments,
-                            "content": [{"type": getattr(b, "type", "text"), "text": getattr(b, "text", "")} for b in result.content],
-                            "raw_text": raw_text,
-                            "data": getattr(result, "structured_content", None),
-                            "is_error": getattr(result, "is_error", False),
-                        }
-            except Exception as e:
-                logger.debug(f"streamable_http_client call_tool failed: {e}. Trying fallback.")
-
-        # HTTP JSON-RPC fallback
-        req_id = str(uuid.uuid4())
-        payload = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments}
-        }
-        all_headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "Mcp-Session-Id": req_id,
-            **headers
-        }
-
-        async with httpx.AsyncClient(timeout=config.get("timeout", MCP_TIMEOUT_SECONDS)) as client:
-            target_url = f"{server_url}/mcp" if not server_url.endswith("/mcp") else server_url
-            resp = await client.post(target_url, json=payload, headers=all_headers)
-            if resp.status_code == 200:
-                data = _parse_jsonrpc_response(resp.text)
-                if "error" in data:
-                    return {
-                        "status": "error",
-                        "tool_name": tool_name,
-                        "arguments": arguments,
-                        "content": [],
-                        "raw_text": str(data["error"]),
-                        "is_error": True,
-                    }
-                res = data.get("result", {})
-                content = res.get("content", [])
-                raw_text = "\n".join(c.get("text", "") for c in content if isinstance(c, dict)).strip()
-                if len(raw_text) > MAX_CONTENT_CHARS:
-                    raw_text = raw_text[:MAX_CONTENT_CHARS] + "\n... [TRUNCATED]"
-                return {
-                    "status": "error" if res.get("isError") else "success",
-                    "tool_name": tool_name,
-                    "arguments": arguments,
-                    "content": content,
-                    "raw_text": raw_text,
-                    "is_error": res.get("isError", False),
-                }
-
-        raise MCPProtocolError(f"HTTP call to tool '{tool_name}' failed with status {resp.status_code}")
-
-
 def _sanitize_arguments(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanitize MCP tool arguments."""
     safe: Dict[str, Any] = {}
     for k, v in args.items():
         if not isinstance(k, str) or len(k) > MAX_PARAM_KEY_LEN:
@@ -498,19 +185,438 @@ def _sanitize_arguments(args: Dict[str, Any]) -> Dict[str, Any]:
     return safe
 
 
-def _parse_jsonrpc_response(text: str) -> Dict[str, Any]:
-    text = text.strip()
-    if text.startswith("data:") or "\ndata:" in text:
-        for line in reversed(text.splitlines()):
-            line = line.strip()
-            if line.startswith("data:"):
-                json_str = line[5:].strip()
-                if json_str:
+def _get_session_key(config: Dict[str, Any]) -> str:
+    transport = config.get("transport", "")
+    if transport == "stdio":
+        cmd = config.get("command", "")
+        args = " ".join(config.get("args", []))
+        return f"stdio:{cmd}:{args}"
+    else:
+        url = config.get("server_url", "")
+        return f"{transport}:{url.rstrip('/')}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCPSessionWorker: Active Persistent Session using Official MCP SDK
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MCPSessionWorker:
+    """
+    Dedicated worker running an official MCP ClientSession within its own task.
+    Preserves active session state and server session ID across operations.
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.transport_type = config.get("transport", "streamable_http")
+        self.session_id: Optional[str] = None
+        self.server_info: Optional[Any] = None
+        self._loop = asyncio.get_running_loop()
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._ready_event: asyncio.Event = asyncio.Event()
+        self._init_error: Optional[Exception] = None
+        self._task: Optional[asyncio.Task] = None
+        self._stopped: bool = False
+        self.last_active: float = time.time()
+
+    def is_alive(self) -> bool:
+        try:
+            current_loop = asyncio.get_running_loop()
+            if self._loop != current_loop:
+                return False
+        except Exception:
+            return False
+        return self._task is not None and not self._task.done() and not self._stopped
+
+    async def start(self, timeout: float = 15.0) -> None:
+        self._task = asyncio.create_task(self._run_loop())
+        try:
+            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            self._stopped = True
+            if self._task and not self._task.done():
+                self._task.cancel()
+            raise MCPTimeoutError(f"MCP server session handshake timed out after {timeout}s.")
+
+        if self._init_error:
+            self._stopped = True
+            raise MCPConnectionError(f"Failed to initialize MCP session: {self._init_error}") from self._init_error
+
+    async def _run_loop(self) -> None:
+        try:
+            if self.transport_type == "stdio":
+                await self._run_stdio()
+            elif self.transport_type == "sse":
+                await self._run_sse()
+            else:
+                await self._run_streamable_http()
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        except Exception as e:
+            self._init_error = e
+            self._ready_event.set()
+            # Drain queue with exception
+            while not self._queue.empty():
+                try:
+                    item = self._queue.get_nowait()
+                    if item and len(item) == 3 and not item[2].done():
+                        item[2].set_exception(e)
+                except Exception:
+                    pass
+        finally:
+            self._stopped = True
+
+    async def _run_streamable_http(self) -> None:
+        if not StreamableHTTPTransport:
+            raise MCPConnectionError("mcp.client.streamable_http is not available in MCP SDK.")
+
+        url = self.config["server_url"]
+        endpoint = url.rstrip("/")
+        if not (endpoint.endswith("/mcp") or endpoint.endswith("/sse")):
+            endpoint = f"{endpoint}/mcp"
+
+        transport = StreamableHTTPTransport(endpoint)
+        client = create_mcp_http_client()
+        headers = self.config.get("headers", {})
+        if headers:
+            client.headers.update(headers)
+
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(client)
+            read_stream_writer, read_stream = create_context_streams(0)
+            write_stream, write_stream_reader = create_context_streams(0)
+
+            async with (
+                read_stream_writer,
+                read_stream,
+                write_stream,
+                write_stream_reader,
+                anyio.create_task_group() as tg,
+            ):
+                def start_get_stream() -> None:
+                    tg.start_soon(transport.handle_get_stream, client, read_stream_writer)
+
+                tg.start_soon(
+                    transport.post_writer,
+                    client,
+                    write_stream_reader,
+                    read_stream_writer,
+                    write_stream,
+                    start_get_stream,
+                    tg,
+                )
+
+                async with ClientSession(read_stream, write_stream) as session:
+                    init_res = await session.initialize()
+                    self.session_id = transport.session_id
+                    self.server_info = getattr(init_res, "server_info", None)
+                    logger.info(f"Streamable HTTP session initialized: ID={self.session_id}")
+                    self._ready_event.set()
+
+                    await self._process_queue(session)
+
+                if transport.session_id:
                     try:
-                        return json.loads(json_str)
-                    except json.JSONDecodeError:
-                        continue
-    return json.loads(text)
+                        await transport.terminate_session(client)
+                    except Exception:
+                        pass
+                tg.cancel_scope.cancel()
+            await resync_tracer()
+
+    async def _run_sse(self) -> None:
+        url = self.config["server_url"]
+        headers = self.config.get("headers", {})
+        async with sse_client(url, headers=headers) as (read, write):
+            async with ClientSession(read, write) as session:
+                init_res = await session.initialize()
+                self.server_info = getattr(init_res, "server_info", None)
+                self._ready_event.set()
+
+                await self._process_queue(session)
+
+    async def _run_stdio(self) -> None:
+        cmd = self.config["command"]
+        args = self.config.get("args", [])
+        env = {**os.environ, **self.config.get("env", {})}
+        parameters = StdioServerParameters(command=cmd, args=args, env=env)
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write) as session:
+                init_res = await session.initialize()
+                self.server_info = getattr(init_res, "server_info", None)
+                self._ready_event.set()
+
+                await self._process_queue(session)
+
+    async def _process_queue(self, session: ClientSession) -> None:
+        try:
+            while not self._stopped:
+                try:
+                    item = await self._queue.get()
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
+                if item is None:
+                    break
+                action, args, fut = item
+                self.last_active = time.time()
+                try:
+                    if action == "list_tools":
+                        res = await session.list_tools()
+                        if not fut.done():
+                            fut.set_result(res)
+                    elif action == "call_tool":
+                        res = await session.call_tool(args["name"], args["arguments"])
+                        if not fut.done():
+                            fut.set_result(res)
+                    elif action == "ping":
+                        await session.send_ping()
+                        if not fut.done():
+                            fut.set_result(True)
+                except Exception as op_err:
+                    if not fut.done():
+                        fut.set_exception(op_err)
+                finally:
+                    self._queue.task_done()
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+
+    async def list_tools(self) -> Any:
+        fut = asyncio.get_running_loop().create_future()
+        await self._queue.put(("list_tools", {}, fut))
+        return await fut
+
+    async def call_tool(self, name: str, arguments: dict) -> Any:
+        fut = asyncio.get_running_loop().create_future()
+        await self._queue.put(("call_tool", {"name": name, "arguments": arguments}, fut))
+        return await fut
+
+    async def ping(self) -> bool:
+        fut = asyncio.get_running_loop().create_future()
+        await self._queue.put(("ping", {}, fut))
+        return await fut
+
+    async def stop(self) -> None:
+        self._stopped = True
+        try:
+            if self._task and not self._task.done():
+                await self._queue.put(None)
+                try:
+                    await asyncio.wait_for(self._task, timeout=1.5)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    if not self._task.done():
+                        self._task.cancel()
+        except Exception:
+            pass
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MCPSessionManager: Session Cache & Lifecycle Pool
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MCPSessionManager:
+    """Pool of active MCP sessions indexed by server endpoint or command."""
+
+    def __init__(self):
+        self._sessions: Dict[str, MCPSessionWorker] = {}
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    async def get_or_create_session(self, config: Dict[str, Any], timeout: float = 15.0) -> MCPSessionWorker:
+        key = _get_session_key(config)
+        async with self._lock:
+            worker = self._sessions.get(key)
+            if worker is not None:
+                if worker.is_alive():
+                    return worker
+                else:
+                    self._sessions.pop(key, None)
+                    try:
+                        await worker.stop()
+                    except Exception:
+                        pass
+
+            worker = MCPSessionWorker(config)
+            await worker.start(timeout=timeout)
+            self._sessions[key] = worker
+            return worker
+
+    async def evict_session(self, config: Dict[str, Any]) -> None:
+        key = _get_session_key(config)
+        async with self._lock:
+            worker = self._sessions.pop(key, None)
+            if worker:
+                await worker.stop()
+
+    async def close_session(self, config: Dict[str, Any]) -> None:
+        await self.evict_session(config)
+
+    async def close_all(self) -> None:
+        async with self._lock:
+            for worker in list(self._sessions.values()):
+                await worker.stop()
+            self._sessions.clear()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCPClient: Public Facade for Relay
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MCPClient:
+    """
+    Production MCP Client managing connection lifecycle, tool discovery,
+    and invocation over persistent official SDK sessions.
+    """
+
+    def __init__(self):
+        self.session_manager = MCPSessionManager()
+
+    async def health_check(self, credentials: Any) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Runs comprehensive health check:
+        1. Connects or reuses active session
+        2. Performs initialize handshake
+        3. Lists available tools
+        """
+        try:
+            config = parse_mcp_config(credentials)
+            validate_mcp_config(config)
+        except Exception as e:
+            return False, {
+                "status": "unavailable",
+                "message": f"Configuration error: {str(e)}",
+                "tool_count": 0,
+                "transport": "unknown",
+            }
+
+        transport = config["transport"]
+        timeout = min(config.get("timeout", 10.0), 15.0)
+
+        try:
+            worker = await self.session_manager.get_or_create_session(config, timeout=timeout)
+            t_res = await asyncio.wait_for(worker.list_tools(), timeout=timeout)
+            tool_count = len(t_res.tools) if hasattr(t_res, "tools") else len(t_res)
+
+            return True, {
+                "status": "healthy",
+                "server": config.get("server_url") or config.get("command"),
+                "transport": transport,
+                "session_id": worker.session_id,
+                "tool_count": tool_count,
+                "message": f"Connected to MCP server ({tool_count} tools discovered).",
+            }
+        except asyncio.TimeoutError:
+            await self.session_manager.evict_session(config)
+            return False, {
+                "status": "degraded",
+                "transport": transport,
+                "tool_count": 0,
+                "message": f"MCP server health check timed out after {timeout}s.",
+            }
+        except Exception as exc:
+            await self.session_manager.evict_session(config)
+            return False, {
+                "status": "unavailable",
+                "transport": transport,
+                "tool_count": 0,
+                "message": f"MCP connection failed: {str(exc)}",
+            }
+
+    async def list_tools(self, credentials: Any) -> List[Dict[str, Any]]:
+        """
+        Retrieves tools list using active official SDK session.
+        Auto-reconnects once if the existing session expired or was terminated.
+        """
+        config = parse_mcp_config(credentials)
+        validate_mcp_config(config)
+
+        timeout = min(config.get("timeout", 15.0), 20.0)
+
+        for attempt in range(2):
+            try:
+                worker = await self.session_manager.get_or_create_session(config, timeout=timeout)
+                res = await asyncio.wait_for(worker.list_tools(), timeout=timeout)
+                raw_tools = getattr(res, "tools", res) if res else []
+                tools: List[Dict[str, Any]] = []
+                for t in raw_tools:
+                    schema = getattr(t, "input_schema", None) or getattr(t, "inputSchema", {})
+                    if hasattr(schema, "model_dump"):
+                        schema = schema.model_dump()
+                    tools.append({
+                        "name": getattr(t, "name", str(t)),
+                        "description": getattr(t, "description", "") or "",
+                        "input_schema": schema if isinstance(schema, dict) else {},
+                    })
+                return tools
+            except Exception as e:
+                logger.warning(f"MCP list_tools attempt {attempt + 1} failed: {e}")
+                await self.session_manager.evict_session(config)
+                if attempt == 1:
+                    raise MCPConnectionError(f"Could not list tools from MCP server: {e}") from e
+
+        return []
+
+    async def call_tool(
+        self,
+        credentials: Any,
+        tool_name: str,
+        arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Executes tools/call on the active MCP session.
+        Auto-reconnects once if the existing session expired or was terminated.
+        """
+        config = parse_mcp_config(credentials)
+        validate_mcp_config(config)
+
+        tool_name = str(tool_name).strip()
+        if not tool_name or len(tool_name) > MAX_TOOL_NAME_LEN:
+            raise ValueError("Invalid tool_name length for MCP call.")
+
+        sanitized_args = _sanitize_arguments(arguments or {})
+        timeout = min(config.get("timeout", MCP_TIMEOUT_SECONDS), 45.0)
+
+        for attempt in range(2):
+            try:
+                worker = await self.session_manager.get_or_create_session(config, timeout=15.0)
+                result = await asyncio.wait_for(
+                    worker.call_tool(tool_name, sanitized_args),
+                    timeout=timeout,
+                )
+
+                content_list = getattr(result, "content", []) or []
+                raw_parts = [getattr(b, "text", "") for b in content_list if getattr(b, "text", "")]
+                raw_text = "\n".join(raw_parts)
+                if len(raw_text) > MAX_CONTENT_CHARS:
+                    raw_text = raw_text[:MAX_CONTENT_CHARS] + "\n... [TRUNCATED]"
+
+                is_error = getattr(result, "is_error", False)
+                return {
+                    "status": "error" if is_error else "success",
+                    "tool_name": tool_name,
+                    "arguments": sanitized_args,
+                    "content": [
+                        {"type": getattr(b, "type", "text"), "text": getattr(b, "text", "")}
+                        for b in content_list
+                    ],
+                    "raw_text": raw_text,
+                    "data": getattr(result, "structured_content", None),
+                    "is_error": is_error,
+                    "session_id": worker.session_id,
+                }
+            except Exception as e:
+                logger.warning(f"MCP call_tool '{tool_name}' attempt {attempt + 1} failed: {e}")
+                await self.session_manager.evict_session(config)
+                if attempt == 1:
+                    raise MCPConnectionError(f"Failed to execute MCP tool '{tool_name}': {e}") from e
+
+        raise MCPConnectionError(f"Failed to execute MCP tool '{tool_name}' after retry.")
+
+    async def disconnect(self, credentials: Any) -> None:
+        """Terminates and clears the active session for this server."""
+        try:
+            config = parse_mcp_config(credentials)
+            await self.session_manager.close_session(config)
+        except Exception:
+            pass
+
+
+# Singleton instance
 mcp_client = MCPClient()

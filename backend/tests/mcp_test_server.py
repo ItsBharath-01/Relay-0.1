@@ -81,4 +81,16 @@ def dangerous_wipe() -> dict:
 
 
 if __name__ == "__main__":
-    server.run(transport="stdio")
+    import argparse
+    parser = argparse.ArgumentParser(description="Relay Notes MCP Test Server")
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse", "streamable-http"], help="Transport mode")
+    parser.add_argument("--port", type=int, default=8085, help="Port for SSE / streamable-http")
+    parser.add_argument("--host", default="127.0.0.1", help="Host address for HTTP/SSE")
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        server.run(transport="stdio")
+    elif args.transport == "sse":
+        server.run(transport="sse", host=args.host, port=args.port)
+    elif args.transport == "streamable-http":
+        server.run(transport="streamable-http", host=args.host, port=args.port)

@@ -177,6 +177,7 @@ class DynamicMCPTool(BaseTool):
             "data": res.get("data"),
             "content": res.get("content", []),
             "is_error": res.get("is_error", False),
+            "session_id": res.get("session_id"),
         }
 
     async def verify(
@@ -422,7 +423,7 @@ class MCPToolAdapter(BaseTool):
         if not credentials:
             return False, "MCP server URL is not configured."
 
-        if isinstance(credentials, str) or (isinstance(credentials, dict) and "access_token" in credentials):
+        if isinstance(credentials, str) or (isinstance(credentials, dict) and "access_token" in credentials and "transport" not in credentials):
             server_url = credentials.get("access_token", "") if isinstance(credentials, dict) else str(credentials)
             server_url = server_url.rstrip("/")
             if not server_url:
@@ -439,8 +440,9 @@ class MCPToolAdapter(BaseTool):
                         },
                         req_id,
                     )
+                    endpoint = server_url if (server_url.endswith("/mcp") or server_url.endswith("/sse")) else f"{server_url}/mcp"
                     resp = await client.post(
-                        f"{server_url}/mcp",
+                        endpoint,
                         json=payload,
                         headers=_mcp_headers(req_id),
                     )
@@ -452,7 +454,7 @@ class MCPToolAdapter(BaseTool):
                             return True, f"Connected to '{name}'"
                         return False, f"Unexpected MCP response: {resp.text[:200]}"
                     resp2 = await client.get(
-                        f"{server_url}/sse",
+                        f"{server_url}/sse" if not server_url.endswith("/sse") else server_url,
                         timeout=5.0,
                         headers={"Accept": "text/event-stream"},
                     )
@@ -462,8 +464,10 @@ class MCPToolAdapter(BaseTool):
             except Exception as e:
                 return False, f"Connection failed: {str(e)}"
 
+        from app.tools.adapters.mcp_client import mcp_client
         healthy, info = await mcp_client.health_check(credentials)
-        return healthy, info.get("message")
+        msg = info.get("message") if isinstance(info, dict) else str(info)
+        return healthy, msg or ("Connected to MCP server" if healthy else "Unreachable")
 
     async def execute(
         self,
@@ -476,7 +480,7 @@ class MCPToolAdapter(BaseTool):
         if not isinstance(arguments, dict):
             arguments = {}
 
-        if isinstance(credentials, str) or (isinstance(credentials, dict) and "access_token" in credentials):
+        if isinstance(credentials, str) or (isinstance(credentials, dict) and "access_token" in credentials and "transport" not in credentials):
             server_url = credentials.get("access_token", "") if isinstance(credentials, dict) else str(credentials)
             server_url = server_url.rstrip("/")
             safe_args = _sanitize_arguments(arguments)
@@ -496,6 +500,7 @@ class MCPToolAdapter(BaseTool):
                 "is_error": is_error,
             }
 
+        from app.tools.adapters.mcp_client import mcp_client
         return await mcp_client.call_tool(credentials, tool_name, arguments)
 
     async def verify(
@@ -518,9 +523,10 @@ class MCPToolAdapter(BaseTool):
             server_url = credentials.rstrip("/")
             req_id = str(uuid.uuid4())
             payload = _jsonrpc_request("tools/list", {}, req_id)
+            endpoint = server_url if (server_url.endswith("/mcp") or server_url.endswith("/sse")) else f"{server_url}/mcp"
             async with httpx.AsyncClient(timeout=MCP_TIMEOUT_SECONDS) as client:
                 resp = await client.post(
-                    f"{server_url}/mcp",
+                    endpoint,
                     json=payload,
                     headers=_mcp_headers(req_id),
                 )
@@ -530,6 +536,7 @@ class MCPToolAdapter(BaseTool):
                     raise RuntimeError(f"MCP tools/list error: {body['error']}")
                 return body.get("result", {}).get("tools", [])
 
+        from app.tools.adapters.mcp_client import mcp_client
         return await mcp_client.list_tools(credentials)
 
 
