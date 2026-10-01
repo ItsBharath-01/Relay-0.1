@@ -92,13 +92,14 @@ class GitHubTool(BaseTool):
                 resp = await client.get(
                     "https://api.github.com/user", 
                     headers={"Authorization": f"Bearer {token}", "User-Agent": "Relay-Agent/0.2"},
-                    timeout=5.0
+                    timeout=10.0
                 )
                 if resp.status_code == 200:
                     return True, "Connected to GitHub."
                 return False, f"GitHub API error: {resp.status_code}"
             except Exception as e:
-                return False, f"Connection failed: {str(e)}"
+                err_msg = str(e) or type(e).__name__
+                return False, f"Connection failed: {err_msg}"
 
     async def verify(
         self,

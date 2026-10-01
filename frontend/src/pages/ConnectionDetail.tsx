@@ -181,6 +181,36 @@ export default function ConnectionDetail() {
         )}
       </Card>
 
+      {/* Discovered MCP Tools */}
+      {conn && conn.discovered_tools && conn.discovered_tools.length > 0 && (
+        <Card className="p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-slate-700">Discovered Tools ({conn.discovered_tools.length})</h2>
+            <Badge label="MCP SDK Dynamic" color="indigo" size="sm" />
+          </div>
+          <div className="space-y-3">
+            {conn.discovered_tools.map((tool) => (
+              <div key={tool.name} className="border border-slate-100 rounded-lg p-3 bg-slate-50/50">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="text-sm font-mono font-medium text-slate-900">{tool.name}</span>
+                  <div className="flex items-center gap-1.5">
+                    <Badge label={tool.capability_id} color="blue" size="sm" />
+                    <Badge
+                      label={tool.risk_profile}
+                      color={tool.risk_profile === "high" ? "red" : tool.risk_profile === "medium" ? "amber" : "green"}
+                      size="sm"
+                    />
+                  </div>
+                </div>
+                {tool.description && (
+                  <p className="text-xs text-slate-500">{tool.description}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {/* Permissions */}
       {conn && conn.permissions && conn.permissions.length > 0 && (
         <Card className="p-4">

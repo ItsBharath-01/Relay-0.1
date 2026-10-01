@@ -43,15 +43,22 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
         # Migration: ensure executions table has outcome, evidence_level, and outcome_summary
-        def migrate_executions(connection):
+        def migrate_schema(connection):
             from sqlalchemy import inspect, text
             inspector = inspect(connection)
-            existing_cols = {col["name"] for col in inspector.get_columns("executions")}
-            if "outcome" not in existing_cols:
+            
+            # Executions migrations
+            exec_cols = {col["name"] for col in inspector.get_columns("executions")}
+            if "outcome" not in exec_cols:
                 connection.execute(text("ALTER TABLE executions ADD COLUMN outcome VARCHAR(50)"))
-            if "evidence_level" not in existing_cols:
+            if "evidence_level" not in exec_cols:
                 connection.execute(text("ALTER TABLE executions ADD COLUMN evidence_level VARCHAR(50)"))
-            if "outcome_summary" not in existing_cols:
+            if "outcome_summary" not in exec_cols:
                 connection.execute(text("ALTER TABLE executions ADD COLUMN outcome_summary TEXT"))
 
-        await conn.run_sync(migrate_executions)
+            # Connections migrations
+            conn_cols = {col["name"] for col in inspector.get_columns("connections")}
+            if "discovered_tools" not in conn_cols:
+                connection.execute(text("ALTER TABLE connections ADD COLUMN discovered_tools JSON"))
+
+        await conn.run_sync(migrate_schema)

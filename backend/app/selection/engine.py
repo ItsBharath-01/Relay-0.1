@@ -47,7 +47,9 @@ class ToolSelectionEngine:
         # Query user connections with permissions
         stmt = select(Connection).options(selectinload(Connection.permissions)).where(Connection.user_id == user_id)
         res = await db.execute(stmt)
-        user_conns: Dict[str, Connection] = {c.app_id: c for c in res.scalars().all()}
+        all_user_conns = res.scalars().all()
+        user_conns: Dict[str, Connection] = {c.app_id: c for c in all_user_conns}
+        user_conns_by_id: Dict[str, Connection] = {c.id: c for c in all_user_conns}
 
         checks: List[ToolCheckResult] = []
         eligible_tools: List[Tuple[BaseTool, str]] = []
@@ -70,13 +72,18 @@ class ToolSelectionEngine:
             # Check 1: Compatibility
             is_compatible = capability_id in tool.provides
 
-            # Check 2: Connection
+            # Check 2: Connection & Ownership
             is_connected = True
             raw_credentials = None
             conn = None
             if tool.requires_connection:
-                conn = user_conns.get(tool.requires_connection)
-                if not conn or conn.status != "connected":
+                if hasattr(tool, "connection_id") and tool.connection_id:
+                    conn = user_conns_by_id.get(tool.connection_id) or user_conns.get(tool.requires_connection)
+                else:
+                    conn = user_conns.get(tool.requires_connection)
+
+                # Strict user ownership check
+                if not conn or (getattr(conn, "user_id", None) and conn.user_id != user_id) or conn.status != "connected":
                     is_connected = False
                 elif conn.encrypted_credentials:
                     raw_credentials = decrypt_secret(conn.encrypted_credentials)

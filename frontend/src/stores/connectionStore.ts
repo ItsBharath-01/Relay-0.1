@@ -39,8 +39,16 @@ interface ConnectionState {
   connectApp: (connectionId: string, payload: { token?: string; url?: string; credentials?: object }) => Promise<void>;
   disconnectApp: (connectionId: string) => Promise<void>;
   togglePermission: (connectionId: string, permissionKey: string, isGranted: boolean) => Promise<void>;
-  registerMCPServer: (payload: { name: string; url: string; description?: string }) => Promise<void>;
   removeMCPServer: (connectionId: string) => Promise<void>;
+  registerMCPServer: (payload: {
+    name: string;
+    transport?: "streamable_http" | "stdio" | "sse";
+    url?: string;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    description?: string;
+  }) => Promise<void>;
 
   // P2-4 new actions
   initConnection: (appId: string) => Promise<string>;

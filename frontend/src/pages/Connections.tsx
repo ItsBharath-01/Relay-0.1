@@ -10,6 +10,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Skeleton } from "../components/ui/Skeleton";
+import { MCPRegistrationModal } from "../components/ui/MCPRegistrationModal";
 import { useUIStore } from "../stores/uiStore";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -95,6 +96,17 @@ function ConnectedCard({ conn, appDef }: { conn: Connection; appDef: AppDefiniti
             ))}
           </div>
         )}
+        {conn.discovered_tools && conn.discovered_tools.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-2 items-center">
+            <Badge label={`${conn.discovered_tools.length} MCP tools`} color="indigo" size="sm" />
+            {conn.discovered_tools.slice(0, 3).map((t) => (
+              <Badge key={t.name} label={t.name} color="slate" size="sm" />
+            ))}
+            {conn.discovered_tools.length > 3 && (
+              <span className="text-xs text-slate-400">+{conn.discovered_tools.length - 3} more</span>
+            )}
+          </div>
+        )}
         <div className="flex gap-2 flex-wrap mt-2">
           <Button size="sm" variant="outline" onClick={handleTest} isLoading={testing}>
             <RefreshCw size={12} className="mr-1" /> Test
@@ -167,7 +179,19 @@ function ConnectForm({ app, onDone }: { app: AppDefinition; onDone: () => void }
     );
   }
 
-  const isUrlBased = app.connection_type === "url_config" || app.connection_type === "mcp";
+  const [mcpModalOpen, setMcpModalOpen] = useState(false);
+
+  if (app.connection_type === "mcp") {
+    return (
+      <div className="mt-3">
+        <p className="text-xs text-slate-500 mb-2">{app.auth_instructions}</p>
+        <Button size="sm" onClick={() => setMcpModalOpen(true)}>Configure MCP Server</Button>
+        <MCPRegistrationModal isOpen={mcpModalOpen} onClose={() => { setMcpModalOpen(false); onDone(); }} />
+      </div>
+    );
+  }
+
+  const isUrlBased = app.connection_type === "url_config";
 
   return (
     <form onSubmit={handleSubmit} className="mt-3 flex gap-2">

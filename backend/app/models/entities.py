@@ -218,6 +218,7 @@ class Connection(Base):
     auth_type = Column(String(50), default="oauth2") # oauth2, token, url, none
     encrypted_credentials = Column(Text, nullable=True)
     scopes = Column(JSON, default=list)
+    discovered_tools = Column(JSON, default=list)
     last_checked_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)

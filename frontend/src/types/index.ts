@@ -188,6 +188,16 @@ export interface Permission {
   is_sensitive: boolean;
 }
 
+export interface DiscoveredToolMeta {
+  name: string;
+  description: string;
+  capability_id: string;
+  capability_label: string;
+  risk_profile: string;
+  input_schema?: Record<string, any>;
+  tool_id?: string;
+}
+
 export interface Connection {
   id: string;
   app_id: string;
@@ -196,6 +206,7 @@ export interface Connection {
   auth_type: string;
   has_credentials: boolean;
   permissions: Permission[];
+  discovered_tools?: DiscoveredToolMeta[];
 }
 
 export interface LLMHealth {

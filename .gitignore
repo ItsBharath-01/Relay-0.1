@@ -29,6 +29,7 @@ backend/relay.db
 # Scratch/temp test files
 backend/test_*.py
 !backend/tests/
+backend/tests/.test_notes_db.json
 
 # Node
 frontend/node_modules/

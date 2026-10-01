@@ -55,21 +55,40 @@ class ConnectionResolver:
             _REFRESH_LOCKS[connection_id] = asyncio.Lock()
         return _REFRESH_LOCKS[connection_id]
 
+    async def resolve(
+        self,
+        app_id: str,
+        user_id: str,
+        db: AsyncSession,
+        required_permissions: Optional[List[str]] = None,
+        allow_reconnection: bool = False
+    ) -> Dict[str, Any]:
+        """Convenience alias for resolve_connection."""
+        return await self.resolve_connection(
+            user_id=user_id,
+            app_id=app_id,
+            required_permissions=required_permissions or [],
+            db=db,
+            allow_reconnection=allow_reconnection
+        )
+
     async def resolve_connection(
         self,
         user_id: str,
         app_id: str,
         required_permissions: List[str],
-        db: AsyncSession
+        db: AsyncSession,
+        allow_reconnection: bool = False
     ) -> Dict[str, Any]:
         """
         Loads user connection, validates permissions, and ensures valid access credentials
         (auto-refreshing Google OAuth tokens if near expiration).
         """
+        from sqlalchemy import or_
         stmt = (
             select(Connection)
             .options(selectinload(Connection.permissions))
-            .where(Connection.user_id == user_id, Connection.app_id == app_id)
+            .where(Connection.user_id == user_id, or_(Connection.app_id == app_id, Connection.id == app_id))
         )
         res = await db.execute(stmt)
         conn = res.scalar_one_or_none()
@@ -77,24 +96,28 @@ class ConnectionResolver:
         if not conn:
             raise PermissionError(f"Connection '{app_id}' does not exist for this user.")
 
-        if conn.status == "needs_reconnection":
+        if conn.status == "needs_reconnection" and not allow_reconnection:
             raise ConnectionRevokedError(f"Connection '{app_id}' requires re-authentication. Please reconnect in Connections.")
 
         from app.catalog.apps import get_app
-        app_def = get_app(app_id)
+        app_def = get_app(conn.app_id)
         needs_credentials = app_def.requires_credentials if app_def else True
 
         if conn.status != "connected":
-            raise PermissionError(f"App '{app_id}' is not connected. Please connect it in Connections.")
+            raise PermissionError(f"App '{conn.name}' is not connected. Please connect it in Connections.")
 
         if needs_credentials and not conn.encrypted_credentials:
-            raise PermissionError(f"App '{app_id}' is not configured with valid credentials.")
+            raise PermissionError(f"App '{conn.name}' is not configured with valid credentials.")
 
         # Validate required permissions
+        if required_permissions is None:
+            required_permissions = []
+        elif isinstance(required_permissions, str):
+            required_permissions = [required_permissions]
         granted_keys = {p.permission_key for p in conn.permissions if p.is_granted}
         for req_perm in required_permissions:
             if req_perm not in granted_keys:
-                raise PermissionError(f"Permission '{req_perm}' is not granted for '{app_id}'. Enable it in Connections.")
+                raise PermissionError(f"Permission '{req_perm}' is not granted for '{conn.name}'. Enable it in Connections.")
 
         if not needs_credentials:
             return {}
@@ -102,12 +125,17 @@ class ConnectionResolver:
         # Decrypt stored credentials
         decrypted_str = decrypt_secret(conn.encrypted_credentials)
         if not decrypted_str:
-            raise PermissionError(f"Could not decrypt stored credentials for '{app_id}'.")
+            raise PermissionError(f"Could not decrypt stored credentials for '{conn.name}'.")
 
         try:
             cred_dict = json.loads(decrypted_str) if isinstance(decrypted_str, str) else decrypted_str
         except Exception:
             cred_dict = {"access_token": decrypted_str}
+
+        # If MCP app, normalize config
+        if conn.app_id == "mcp" or app_id.startswith("mcp"):
+            from app.tools.adapters.mcp_client import parse_mcp_config
+            cred_dict = parse_mcp_config(cred_dict)
 
         # If Google app, handle token refresh
         if app_id in ["google_calendar", "gmail"] and "refresh_token" in cred_dict:

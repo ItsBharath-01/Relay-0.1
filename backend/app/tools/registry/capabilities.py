@@ -127,3 +127,12 @@ def get_capability(cap_id: str) -> Optional[Capability]:
 def get_valid_capability_ids() -> List[str]:
     """Returns the list of valid capability IDs."""
     return list(CAPABILITY_REGISTRY.keys())
+
+def register_capability(cap: Capability) -> None:
+    """Registers or updates a capability dynamically."""
+    CAPABILITY_REGISTRY[cap.id] = cap
+
+def unregister_capability(cap_id: str) -> None:
+    """Unregisters a capability if present."""
+    CAPABILITY_REGISTRY.pop(cap_id, None)
+

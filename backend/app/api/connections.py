@@ -1,4 +1,8 @@
+import json
+import logging
 from typing import List, Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,7 +138,10 @@ async def connect_app(
         raise HTTPException(status_code=404, detail="Connection not found.")
 
     if conn.status == "coming_soon":
-        raise HTTPException(status_code=400, detail="This integration is coming soon and cannot be connected yet.")
+        from app.catalog.apps import get_app as _get_app
+        app_def = _get_app(conn.app_id)
+        if not app_def or not app_def.available:
+            raise HTTPException(status_code=400, detail="This integration is coming soon and cannot be connected yet.")
 
     token_val = req.token or req.url or (req.credentials.get("access_token") if req.credentials else None)
     if not token_val:
@@ -354,7 +361,11 @@ from fastapi import HTTPException
 
 class MCPServerRegisterRequest(BaseModel):
     name: str          # Human-readable server name (e.g. "Filesystem Tools")
-    url: str           # Base URL of the MCP server (e.g. http://localhost:8080)
+    url: Optional[str] = None           # Base URL of the MCP server
+    command: Optional[str] = None       # Command for stdio (e.g. "python", "node")
+    args: Optional[List[str]] = None    # Arguments for stdio
+    env: Optional[Dict[str, str]] = None
+    transport: Optional[str] = None    # "streamable_http" | "stdio" | "sse"
     description: str = ""
 
 @router.post("/mcp/register")
@@ -363,22 +374,37 @@ async def register_mcp_server(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    import re
+    from app.tools.adapters.mcp_client import mcp_client, parse_mcp_config, validate_mcp_config
+    from app.tools.adapters.mcp_adapter import discover_and_register_mcp_tools
+
     name = req.name.strip()
-    url = req.url.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Server name is required.")
-    if not url:
-        raise HTTPException(status_code=400, detail="Server URL is required.")
-    if not re.match(r"^https?://", url):
-        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
 
+    # Build config payload
+    config_dict = {
+        "transport": req.transport,
+        "server_url": req.url,
+        "command": req.command,
+        "args": req.args or [],
+        "env": req.env or {},
+    }
+    try:
+        norm_config = parse_mcp_config(config_dict)
+        validate_mcp_config(norm_config)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    # Health check server before saving
     adapter = _MCPAdapter()
-    healthy, health_msg = await adapter.health_check(credentials=url)
+    healthy, health_msg = await adapter.health_check(credentials=req.url or norm_config)
     if not healthy:
-        raise HTTPException(status_code=400, detail=f"Could not connect to MCP server: {health_msg}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not connect to MCP server: {health_msg if isinstance(health_msg, str) else 'Unreachable'}"
+        )
 
-    # Use a single static app_id for MCP in Relay 0.2 to match the tool registry
+    # Use single static app_id for MCP in Relay 0.2 to match the tool registry
     app_id = "mcp"
 
     existing_res = await db.execute(
@@ -389,15 +415,12 @@ async def register_mcp_server(
     )
     existing = existing_res.scalar_one_or_none()
     
-    # Store just the url in json to match how Google oauth tokens are stored for robustness
-    # The MCP adapter expects string, but the resolver currently assumes JSON for some reason?
-    # Actually resolver passes the raw decrypted string back.
-    # Let's store raw URL for MCP.
-    
+    cred_json = json.dumps(norm_config)
+    enc_creds = encrypt_secret(cred_json)
+
     if existing:
-        # Update existing MCP server instead of creating a second one
         existing.name = name
-        existing.encrypted_credentials = encrypt_secret(url)
+        existing.encrypted_credentials = enc_creds
         existing.status = "connected"
         conn = existing
     else:
@@ -406,8 +429,8 @@ async def register_mcp_server(
             app_id=app_id,
             name=name,
             status="connected",
-            auth_type="url",
-            encrypted_credentials=encrypt_secret(url),
+            auth_type="url" if norm_config["transport"] != "stdio" else "local",
+            encrypted_credentials=enc_creds,
         )
         db.add(conn)
         await db.flush()
@@ -425,6 +448,15 @@ async def register_mcp_server(
             )
             db.add(perm)
 
+    # Discover and dynamically register tools
+    try:
+        discovered = await discover_and_register_mcp_tools(conn.id, name, norm_config)
+        conn.discovered_tools = discovered
+        conn.scopes = [t["capability_id"] for t in discovered]
+    except Exception as exc:
+        logger.warning(f"Tool discovery on registration failed: {exc}")
+        discovered = []
+
     await db.commit()
     await db.refresh(conn)
 
@@ -432,9 +464,12 @@ async def register_mcp_server(
         "id": conn.id,
         "app_id": conn.app_id,
         "name": conn.name,
-        "url": url,
+        "url": norm_config.get("server_url"),
+        "transport": norm_config.get("transport"),
         "status": conn.status,
-        "health_message": health_msg,
+        "health_message": health_msg if isinstance(health_msg, str) else (health_msg.get("message", "") if isinstance(health_msg, dict) else ""),
+        "discovered_tools": discovered,
+        "tool_count": len(discovered),
     }
 
 @router.get("/mcp/servers")
@@ -460,6 +495,8 @@ async def list_mcp_servers(
             "name": s.name,
             "status": s.status,
             "has_credentials": bool(s.encrypted_credentials),
+            "discovered_tools": s.discovered_tools or [],
+            "tool_count": len(s.discovered_tools or []),
             "permissions": [
                 {
                     "id": p.id,
@@ -502,13 +539,16 @@ async def list_mcp_server_tools(
         raise HTTPException(status_code=403, detail="list_tools permission is not granted for this connection.")
 
     server_url = decrypt_secret(conn.encrypted_credentials)
-    if isinstance(server_url, dict):
-        server_url = server_url.get("url", "")
     adapter = _MCPAdapter()
     try:
         tools = await adapter.list_tools(server_url)
+        conn.discovered_tools = tools
+        await db.commit()
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to list tools: {exc}")
+        if conn.discovered_tools:
+            tools = conn.discovered_tools
+        else:
+            raise HTTPException(status_code=502, detail=f"Failed to list tools: {exc}")
 
     return {
         "connection_id": connection_id,
@@ -536,24 +576,35 @@ async def check_mcp_server_health(
     if not conn.encrypted_credentials:
         conn.status = "not_connected"
         await db.commit()
-        return {"status": "not_connected", "message": "No server URL configured."}
+        return {"status": "not_connected", "message": "No server configuration."}
 
-    server_url = decrypt_secret(conn.encrypted_credentials)
-    if isinstance(server_url, dict):
-        server_url = server_url.get("url", "")
-    adapter = _MCPAdapter()
-    healthy, health_msg = await adapter.health_check(credentials=server_url)
+    resolver = ConnectionResolver()
+    credentials = await resolver.resolve(conn.app_id, current_user.id, db, allow_reconnection=True)
+    from app.tools.adapters.mcp_client import mcp_client
+    from app.tools.adapters.mcp_adapter import discover_and_register_mcp_tools
 
+    healthy, health_info = await mcp_client.health_check(credentials)
     conn.status = "connected" if healthy else "error"
     from datetime import datetime, timezone
     conn.last_checked_at = datetime.now(timezone.utc)
+
+    if healthy:
+        try:
+            tools = await discover_and_register_mcp_tools(conn.id, conn.name, credentials)
+            conn.discovered_tools = tools
+            conn.scopes = [t["capability_id"] for t in tools]
+        except Exception as e:
+            logger.warning(f"Failed to refresh tools: {e}")
+
     await db.commit()
 
     return {
         "connection_id": connection_id,
         "status": conn.status,
         "healthy": healthy,
-        "message": health_msg,
+        "message": health_info.get("message"),
+        "transport": health_info.get("transport"),
+        "tool_count": health_info.get("tool_count", 0),
     }
 
 @router.delete("/mcp/{connection_id}")
@@ -571,6 +622,12 @@ async def remove_mcp_server(
     conn = res.scalar_one_or_none()
     if not conn:
         raise HTTPException(status_code=404, detail="MCP server connection not found.")
+
+    # Unregister dynamic tools for this connection from registry
+    from app.tools.registry import unregister_tool, get_all_tools
+    to_remove = [t.id for t in get_all_tools() if getattr(t, "connection_id", None) == conn.id]
+    for tid in to_remove:
+        unregister_tool(tid)
 
     await db.delete(conn)
     await db.commit()
@@ -608,7 +665,42 @@ async def check_connection_health(
 
     checked_at = datetime.now(timezone.utc).isoformat()
 
-    # Find the tool adapter for this connection's app_id
+    # Special handling for MCP connections
+    if conn.app_id == "mcp":
+        credentials = None
+        if conn.encrypted_credentials:
+            try:
+                resolver = ConnectionResolver()
+                credentials = await resolver.resolve(conn.app_id, current_user.id, db, allow_reconnection=True)
+            except Exception:
+                credentials = None
+
+        from app.tools.adapters.mcp_client import mcp_client
+        from app.tools.adapters.mcp_adapter import discover_and_register_mcp_tools
+        healthy, health_info = await mcp_client.health_check(credentials)
+        if healthy:
+            conn.status = "connected"
+            try:
+                tools = await discover_and_register_mcp_tools(conn.id, conn.name, credentials)
+                conn.discovered_tools = tools
+                conn.scopes = [t["capability_id"] for t in tools]
+            except Exception as e:
+                logger.warning(f"Tool refresh error during health check: {e}")
+        else:
+            conn.status = "needs_reconnection"
+
+        await db.commit()
+        return {
+            "connection_id": connection_id,
+            "status": "healthy" if healthy else "degraded",
+            "message": health_info.get("message", "OK" if healthy else "Health check failed."),
+            "server": health_info.get("server"),
+            "transport": health_info.get("transport"),
+            "tool_count": health_info.get("tool_count", 0),
+            "checked_at": checked_at,
+        }
+
+    # Find the tool adapter for other connections
     tool = get_tool(conn.app_id)
     if not tool:
         caps = get_tools_for_capability(conn.app_id)
@@ -627,13 +719,13 @@ async def check_connection_health(
     if conn.encrypted_credentials:
         try:
             resolver = ConnectionResolver()
-            credentials = await resolver.resolve(conn.app_id, current_user.id, db)
+            credentials = await resolver.resolve(conn.app_id, current_user.id, db, allow_reconnection=True)
         except Exception:
             credentials = None
 
     try:
         healthy, message = await asyncio.wait_for(
-            tool.health_check(credentials), timeout=5.0
+            tool.health_check(credentials), timeout=10.0
         )
         conn.status = "connected" if healthy else "needs_reconnection"
         await db.commit()
@@ -649,7 +741,7 @@ async def check_connection_health(
         return {
             "connection_id": connection_id,
             "status": "degraded",
-            "message": "Health check timed out after 5 seconds.",
+            "message": "Health check timed out after 10 seconds.",
             "checked_at": checked_at,
         }
     except Exception:

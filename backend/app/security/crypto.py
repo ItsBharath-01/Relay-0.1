@@ -58,12 +58,13 @@ def encrypt_secret(secret_data: str) -> str:
     encrypted = f.encrypt(secret_data.encode())
     return encrypted.decode()
 
-def decrypt_secret(encrypted_data: str) -> str:
+def decrypt_secret(encrypted_data: Any) -> str:
     """Decrypts encrypted credentials."""
     if not encrypted_data:
         return ""
     f = _get_fernet()
-    decrypted = f.decrypt(encrypted_data.encode())
+    data_bytes = encrypted_data if isinstance(encrypted_data, bytes) else str(encrypted_data).encode()
+    decrypted = f.decrypt(data_bytes)
     return decrypted.decode()
 
 def hash_payload(payload: Any) -> str:

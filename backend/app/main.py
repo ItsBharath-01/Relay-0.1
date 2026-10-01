@@ -25,6 +25,30 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle using the modern lifespan pattern."""
     logger.info("Initializing database tables...")
     await init_db()
+
+    # Re-register tools from active MCP servers on startup
+    try:
+        from app.core.database import async_session_maker
+        from app.models.entities import Connection
+        from app.connections.resolver import ConnectionResolver
+        from app.tools.adapters.mcp_adapter import discover_and_register_mcp_tools
+        from sqlalchemy import select
+        async with async_session_maker() as db:
+            mcp_conns = (await db.execute(select(Connection).where(Connection.app_id == "mcp", Connection.status == "connected"))).scalars().all()
+            resolver = ConnectionResolver()
+            for mc in mcp_conns:
+                if mc.encrypted_credentials:
+                    try:
+                        creds = await resolver.resolve(mc.app_id, mc.user_id, db, allow_reconnection=True)
+                        tools = await discover_and_register_mcp_tools(mc.id, mc.name, creds)
+                        mc.discovered_tools = tools
+                        await db.commit()
+                        logger.info(f"Loaded {len(tools)} tools from MCP server '{mc.name}'")
+                    except Exception as e:
+                        logger.warning(f"Could not connect to MCP server '{mc.name}' on startup: {e}")
+    except Exception as e:
+        logger.warning(f"MCP startup tool registration error: {e}")
+
     logger.info(f"Relay API online. LLM Provider: {settings.LLM_PROVIDER}, Model: {settings.OLLAMA_MODEL}")
     yield
     logger.info("Relay API shutting down.")

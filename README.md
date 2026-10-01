@@ -56,7 +56,7 @@ GOAL
 | `github` | `issue_create`, `issue_read` | API | Personal Access Token (PAT) |
 | `rest_connector` | `api_request` | REST / API | API Token / Header Key |
 | `local_filesystem` | `file_read` | Local | Workspace Sandboxing |
-| `mcp_tool` | `mcp_call` | MCP | Streamable HTTP / SSE endpoint |
+| `mcp_tool` / Dynamic MCP | Verb-action mapped capabilities (e.g. `note_create`, `search_notes`) | MCP | Streamable HTTP, SSE, or Local Stdio Process |
 
 ---
 
@@ -101,21 +101,21 @@ Frontend Web UI will be available at: `http://127.0.0.1:5173`.
 
 ## 🧪 Testing & Verification
 
-Relay maintains a strict 100% passing test bar across unit, integration, and security test suites.
+Relay maintains a strict 100% passing test bar across unit, integration, security, and MCP test suites.
 
 ### Run Backend Tests:
 ```bash
 cd backend
 .\venv\Scripts\python -m pytest tests/ -q
 ```
-*Current test suite*: **134 passed, 0 failed**.
+*Current test suite*: **153 passed, 0 failed** in 156s.
 
 ### Run Frontend Production Build:
 ```bash
 cd frontend
 npm run build
 ```
-*Current build*: **1638 modules transformed, 0 TypeScript errors, exit code 0**.
+*Current build*: **1647 modules transformed, 0 TypeScript errors, exit code 0**.
 
 ---
 
