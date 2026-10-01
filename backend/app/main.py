@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import logging
 
 from app.core.config import settings
@@ -18,12 +19,24 @@ from app.api.catalog import router as catalog_router
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("relay")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle using the modern lifespan pattern."""
+    logger.info("Initializing database tables...")
+    await init_db()
+    logger.info(f"Relay API online. LLM Provider: {settings.LLM_PROVIDER}, Model: {settings.OLLAMA_MODEL}")
+    yield
+    logger.info("Relay API shutting down.")
+
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="Relay - Autonomous Work Agent Backend",
     version="0.2.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # CORS
@@ -53,6 +66,7 @@ for r in routers:
     app.include_router(r, prefix="/api")
     app.include_router(r, prefix="/api/v1")
 
+
 @app.get("/")
 async def root():
     return {
@@ -63,9 +77,3 @@ async def root():
         "llm_provider": settings.LLM_PROVIDER,
         "ollama_model": settings.OLLAMA_MODEL,
     }
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Initializing database tables...")
-    await init_db()
-    logger.info(f"Relay API online. LLM Provider: {settings.LLM_PROVIDER}, Model: {settings.OLLAMA_MODEL}")
