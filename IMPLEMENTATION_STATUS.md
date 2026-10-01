@@ -264,5 +264,29 @@ Unified integration discovery and runtime selection via a central AppDefinition 
 - **Dashboard Upgrades (Dashboard.tsx)**: Added real-time Connection Health Bar displaying active app statuses, degraded connection alerts, and navigation shortcuts.
 
 ### Final Verification Numbers
-- **Backend Test Suite**: 127 passed, 0 failed
+- **Backend Test Suite**: 134 passed, 0 failed
 - **Frontend Build**: 1638 modules transformed, exit code 0, 0 TypeScript errors
+
+---
+
+## 🎯 P3 Completed Phase: General-Purpose Arbitrary Input Execution & Universal Goal Verification
+
+### Summary
+Made Relay fully general-purpose for arbitrary natural-language requests without hardcoding or phrase-dependent routing. Separated task-level execution success from end-to-end goal achievement with strict evidence level tracking (`ACTION_REQUESTED`, `ACTION_EXECUTED`, `ACTION_VERIFIED`, `GOAL_ACHIEVED`) and explicit outcome statuses (`COMPLETED`, `PARTIALLY_COMPLETED`, `FAILED`, `BLOCKED`, `CANCELLED`, `STOPPED`).
+
+### Core Enhancements
+- **Domain-Agnostic Intent & Goal Representation**:
+  - `backend/app/schemas/goal.py`: Added `desired_outcome` and `success_criteria` to `GoalUnderstanding`. Added normalization for clarification questions.
+  - `backend/app/agent/prompts/goal_understanding.py`: Prompts local LLM to generate measurable criteria and intended outcomes.
+  - `backend/app/services/planning_service.py`: Forwards criteria to planning prompt.
+- **Universal Goal Outcome & Verification Engine**:
+  - `backend/app/verification/engine.py`: Added `verify_goal_outcome()` assessing task completions against stated criteria and verified tool observations. Observation-only or unconfirmed state transitions (such as unverified media DOM audio playback) are accurately reported as `not_verifiable` (capping evidence at `ACTION_EXECUTED` rather than false `GOAL_ACHIEVED`).
+  - `backend/app/agent/execution_runner.py`: Sets explicit `execution.outcome`, `execution.evidence_level`, `execution.outcome_summary`, and `criteria_evaluations`. Honestly marks missing tools as `BLOCKED` with `ACTION_REQUESTED`.
+- **Database & API Extensions**:
+  - Persisted `outcome`, `evidence_level`, and `outcome_summary` in SQLite `executions` table via safe column migration.
+  - Exposed outcomes and criteria evaluations in SSE event streams (`execution_completed`, `execution_failed`), execution endpoints, and Markdown audit summaries.
+- **Browser Automation Robustness**:
+  - `backend/app/tools/adapters/browser.py`: Implemented system Chrome / Microsoft Edge channel auto-detection for reliable, headless browser actions on Windows without CDN binary dependencies.
+- **Frontend UI Observability**:
+  - `ExecutionWorkspace.tsx` and `ExecutionSummary.tsx`: Real-time outcome status badges, evidence level badges, outcome assessment banners, and granular success criteria checklist cards.
+

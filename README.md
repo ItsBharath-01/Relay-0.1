@@ -108,7 +108,7 @@ Relay maintains a strict 100% passing test bar across unit, integration, and sec
 cd backend
 .\venv\Scripts\python -m pytest tests/ -q
 ```
-*Current test suite*: **127 passed, 0 failed**.
+*Current test suite*: **134 passed, 0 failed**.
 
 ### Run Frontend Production Build:
 ```bash
