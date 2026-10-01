@@ -152,12 +152,23 @@ export interface Verification {
   created_at: string;
 }
 
+export interface GoalCriterionEvaluation {
+  criterion: string;
+  status: "met" | "unmet" | "not_verifiable";
+  evidence: Record<string, any>;
+  reason: string;
+}
+
 export interface ExecutionDetail {
   id: string;
   goal_id: string;
   goal_text: string;
   plan_id: string;
   status: "running" | "paused" | "waiting_approval" | "completed" | "failed" | "cancelled" | "stopped";
+  outcome?: "COMPLETED" | "PARTIALLY_COMPLETED" | "FAILED" | "BLOCKED" | "CANCELLED" | "STOPPED" | null;
+  evidence_level?: "ACTION_REQUESTED" | "ACTION_EXECUTED" | "ACTION_VERIFIED" | "GOAL_ACHIEVED" | null;
+  outcome_summary?: string | null;
+  criteria_evaluations?: GoalCriterionEvaluation[];
   progress: number;
   current_task_id?: string | null;
   current_action?: string | null;

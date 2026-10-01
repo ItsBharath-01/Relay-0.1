@@ -107,13 +107,27 @@ class ExecutionRunner:
                         failed_deps = [t for t in dep_tasks if t.status == "failed"]
                         if failed_deps:
                             task.status = "failed"
+                            completed_count = len([t for t in tasks if t.status == "completed"])
+                            execution.outcome = "PARTIALLY_COMPLETED" if completed_count > 0 else "BLOCKED"
+                            execution.evidence_level = "ACTION_EXECUTED" if completed_count > 0 else "ACTION_REQUESTED"
                             execution.status = "failed"
                             execution.completed_at = datetime.now(timezone.utc)
+                            execution.outcome_summary = f"Task '{task.title}' skipped: dependency '{failed_deps[0].title}' failed."
                             await db.commit()
                             await event_broadcaster.emit(
                                 db, execution_id, "task_failed",
                                 f"Task '{task.title}' skipped: dependency '{failed_deps[0].title}' failed.",
                                 task_id=task.id,
+                            )
+                            await event_broadcaster.emit(
+                                db, execution_id, "execution_failed",
+                                f"Execution stopped: prerequisite task failed.",
+                                task_id=task.id,
+                                payload={
+                                    "outcome": execution.outcome,
+                                    "evidence_level": execution.evidence_level,
+                                    "summary": execution.outcome_summary
+                                }
                             )
                             return
                         all_done = all(t.status == "completed" for t in dep_tasks)
@@ -124,13 +138,27 @@ class ExecutionRunner:
                     else:
                         # Timeout waiting for deps
                         task.status = "failed"
+                        completed_count = len([t for t in tasks if t.status == "completed"])
+                        execution.outcome = "PARTIALLY_COMPLETED" if completed_count > 0 else "FAILED"
+                        execution.evidence_level = "ACTION_EXECUTED" if completed_count > 0 else "ACTION_REQUESTED"
                         execution.status = "failed"
                         execution.completed_at = datetime.now(timezone.utc)
+                        execution.outcome_summary = f"Task '{task.title}' timed out waiting for dependencies."
                         await db.commit()
                         await event_broadcaster.emit(
                             db, execution_id, "task_failed",
                             f"Task '{task.title}' timed out waiting for dependencies.",
                             task_id=task.id,
+                        )
+                        await event_broadcaster.emit(
+                            db, execution_id, "execution_failed",
+                            f"Execution stopped: dependency wait timed out.",
+                            task_id=task.id,
+                            payload={
+                                "outcome": execution.outcome,
+                                "evidence_level": execution.evidence_level,
+                                "summary": execution.outcome_summary
+                            }
                         )
                         return
 
@@ -163,17 +191,39 @@ class ExecutionRunner:
                 )
 
                 if not decision.selected_tool_id:
-                    # Honest failure: missing connection
+                    # Honest failure: missing connection / capability
                     task.status = "failed"
+                    completed_count = len([t for t in tasks if t.status == "completed"])
+                    execution.outcome = "PARTIALLY_COMPLETED" if completed_count > 0 else "BLOCKED"
+                    execution.evidence_level = "ACTION_EXECUTED" if completed_count > 0 else "ACTION_REQUESTED"
                     execution.status = "failed"
                     execution.completed_at = datetime.now(timezone.utc)
+                    execution.outcome_summary = (
+                        f"I can understand this goal, but no authorized tool currently provides the capability '{task.capability_id}'."
+                    )
                     await db.commit()
 
+                    fail_msg = f"I can understand this goal, but no authorized tool currently provides the capability '{task.capability_id}'."
                     await event_broadcaster.emit(
                         db, execution_id, "task_failed",
-                        f"No connected tool available for capability '{task.capability_id}'. Connect the required app in Connections.",
+                        fail_msg,
                         task_id=task.id,
-                        payload={"capability": task.capability_id, "explanation": decision.explanation}
+                        payload={
+                            "capability": task.capability_id,
+                            "explanation": decision.explanation,
+                            "candidate_checks": [c.model_dump() for c in decision.candidate_checks],
+                            "guidance": "Connect or authorize an application providing this capability in Connections to proceed."
+                        }
+                    )
+                    await event_broadcaster.emit(
+                        db, execution_id, "execution_failed",
+                        f"Execution stopped: required capability '{task.capability_id}' is not available.",
+                        task_id=task.id,
+                        payload={
+                            "outcome": execution.outcome,
+                            "evidence_level": execution.evidence_level,
+                            "summary": execution.outcome_summary
+                        }
                     )
                     return
 
@@ -624,6 +674,16 @@ class ExecutionRunner:
                                     task.status = "completed"
                                     task.selected_tool_id = alt_tool.id
                                     task.result = alt_result
+
+                                    # Persist recovery verification entity
+                                    v_rec = Verification(
+                                        execution_id=execution_id,
+                                        task_id=task.id,
+                                        criterion=f"Verify recovered {recovery_plan.updated_action or action_name} outcome via {alt_tool.name}",
+                                        result="passed",
+                                        evidence=alt_v.evidence
+                                    )
+                                    db.add(v_rec)
                                     await db.commit()
 
                                     await event_broadcaster.emit(
@@ -643,8 +703,12 @@ class ExecutionRunner:
 
                     # Recovery failed or no alternative available
                     task.status = "failed"
+                    completed_count = len([t for t in tasks if t.status == "completed"])
+                    execution.outcome = "PARTIALLY_COMPLETED" if completed_count > 0 else "FAILED"
+                    execution.evidence_level = "ACTION_EXECUTED" if completed_count > 0 else "ACTION_REQUESTED"
                     execution.status = "failed"
                     execution.completed_at = datetime.now(timezone.utc)
+                    execution.outcome_summary = f"Task '{task.title}' failed: {redact_sensitive_data(problem_desc)}"
                     await db.commit()
 
                     await event_broadcaster.emit(
@@ -652,6 +716,16 @@ class ExecutionRunner:
                         "No alternative recovery plan could complete the task. Stopping honestly as failed.",
                         task_id=task.id,
                         payload={"success": False}
+                    )
+                    await event_broadcaster.emit(
+                        db, execution_id, "execution_failed",
+                        f"Execution failed on Task {task.order}: {task.title}",
+                        task_id=task.id,
+                        payload={
+                            "outcome": execution.outcome,
+                            "evidence_level": execution.evidence_level,
+                            "summary": execution.outcome_summary
+                        }
                     )
                     return
 
@@ -669,13 +743,43 @@ class ExecutionRunner:
                     payload={"completed": completed_count, "total": total_tasks}
                 )
 
-            # All tasks completed
-            execution.status = "completed"
+            # All tasks finished — perform universal Goal-Level Verification
+            understanding = goal.understanding or {}
+            desired_outcome = understanding.get("desired_outcome")
+            success_criteria = understanding.get("success_criteria", [])
+
+            # Load all verifications recorded for this execution
+            v_stmt = select(Verification).where(Verification.execution_id == execution_id)
+            v_res = await db.execute(v_stmt)
+            all_verifications = v_res.scalars().all()
+
+            goal_v_result = await verification_engine.verify_goal_outcome(
+                goal_text=goal.text,
+                desired_outcome=desired_outcome,
+                success_criteria=success_criteria,
+                tasks=tasks,
+                task_verifications=all_verifications
+            )
+
+            execution.outcome = goal_v_result.goal_outcome
+            execution.evidence_level = goal_v_result.evidence_level
+            execution.outcome_summary = goal_v_result.summary
+            execution.status = "completed" if goal_v_result.goal_outcome == "COMPLETED" else "completed"
             execution.progress = 1.0
             execution.completed_at = datetime.now(timezone.utc)
             await db.commit()
 
-            duration_s = (execution.completed_at - execution.started_at).total_seconds()
+            completed_time = execution.completed_at
+            started_time = execution.started_at
+            if completed_time and started_time:
+                if completed_time.tzinfo is not None and started_time.tzinfo is None:
+                    started_time = started_time.replace(tzinfo=timezone.utc)
+                elif completed_time.tzinfo is None and started_time.tzinfo is not None:
+                    completed_time = completed_time.replace(tzinfo=timezone.utc)
+                duration_s = max(0.0, (completed_time - started_time).total_seconds())
+            else:
+                duration_s = 0.0
+
             summary_stats = {
                 "tasks_completed": completed_count,
                 "total_tasks": total_tasks,
@@ -683,12 +787,17 @@ class ExecutionRunner:
                 "recoveries": recoveries_count,
                 "approvals": approvals_count,
                 "duration_seconds": round(duration_s, 1),
+                "outcome": execution.outcome,
+                "evidence_level": execution.evidence_level,
+                "summary": execution.outcome_summary,
+                "criteria_evaluations": [c.model_dump() for c in goal_v_result.criteria_evaluations]
             }
 
             await event_broadcaster.emit(
                 db, execution_id, "execution_completed",
-                f"Goal completed successfully in {round(duration_s, 1)}s.",
+                f"Goal {execution.outcome.lower()}: {execution.outcome_summary}",
                 payload=summary_stats
             )
 
 execution_runner = ExecutionRunner()
+

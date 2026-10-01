@@ -49,3 +49,24 @@ async def test_document_summarize_verification():
     ver = await verification_engine.verify_task_outcome("document_summarize", "document_summarize", params, result)
     assert ver.result == "passed"
     assert ver.evidence["summary_char_count"] > 20
+
+
+@pytest.mark.asyncio
+async def test_browser_media_playback_not_verifiable_without_player_state():
+    """Rule 6: browser navigation for music/media cannot claim success without active player state."""
+    params = {"url": "https://music.example.com", "action": "play_song"}
+    result = {"url": "https://music.example.com", "status_code": 200, "title": "Music Site", "char_count": 500}
+    ver = await verification_engine.verify_task_outcome("browser_navigate", "play_song", params, result)
+    assert ver.result == "not_verifiable"
+    assert "player_state" in ver.evidence
+
+
+@pytest.mark.asyncio
+async def test_browser_media_playback_passed_with_active_player_state():
+    """Rule 6: active player state confirms playback."""
+    params = {"url": "https://music.example.com", "action": "play_song"}
+    result = {"url": "https://music.example.com", "status_code": 200, "title": "Music Site", "player_state": "playing"}
+    ver = await verification_engine.verify_task_outcome("browser_navigate", "play_song", params, result)
+    assert ver.result == "passed"
+    assert ver.evidence["player_state"] == "playing"
+

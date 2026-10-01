@@ -80,14 +80,24 @@ class ConnectionResolver:
         if conn.status == "needs_reconnection":
             raise ConnectionRevokedError(f"Connection '{app_id}' requires re-authentication. Please reconnect in Connections.")
 
-        if conn.status != "connected" or not conn.encrypted_credentials:
+        from app.catalog.apps import get_app
+        app_def = get_app(app_id)
+        needs_credentials = app_def.requires_credentials if app_def else True
+
+        if conn.status != "connected":
             raise PermissionError(f"App '{app_id}' is not connected. Please connect it in Connections.")
+
+        if needs_credentials and not conn.encrypted_credentials:
+            raise PermissionError(f"App '{app_id}' is not configured with valid credentials.")
 
         # Validate required permissions
         granted_keys = {p.permission_key for p in conn.permissions if p.is_granted}
         for req_perm in required_permissions:
             if req_perm not in granted_keys:
                 raise PermissionError(f"Permission '{req_perm}' is not granted for '{app_id}'. Enable it in Connections.")
+
+        if not needs_credentials:
+            return {}
 
         # Decrypt stored credentials
         decrypted_str = decrypt_secret(conn.encrypted_credentials)

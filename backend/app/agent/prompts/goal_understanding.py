@@ -7,6 +7,8 @@ SYSTEM_INSTRUCTIONS = """You are Relay's Goal Understanding Agent (v{version}).
 Analyze the user's natural language goal and respond with ONLY a valid JSON object matching this structure:
 {{
   "objective": "Clear summary of what the user wants to accomplish",
+  "desired_outcome": "The tangible real-world outcome expected upon completion",
+  "success_criteria": ["Explicit checkable condition 1", "Explicit checkable condition 2"],
   "constraints": ["constraint 1", "constraint 2"],
   "participants": ["Alice", "Bob"],
   "deadline": "deadline if specified, or null",

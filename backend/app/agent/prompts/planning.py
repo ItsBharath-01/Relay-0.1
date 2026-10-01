@@ -55,7 +55,9 @@ def build_planning_prompt(
     participants: List[str],
     deadline: Optional[str],
     required_capabilities: List[str],
-    language: str = "en"
+    language: str = "en",
+    desired_outcome: Optional[str] = None,
+    success_criteria: Optional[List[str]] = None,
 ) -> tuple[str, str]:
     caps = get_all_capabilities()
     cap_lines = ", ".join([f"'{c.id}'" for c in caps])
@@ -66,9 +68,13 @@ def build_planning_prompt(
         language=language
     )
 
+    criteria_str = "\n".join([f"- {sc}" for sc in (success_criteria or [])]) or "None"
+
     user_prompt = (
         f"Goal: {goal}\n"
         f"Objective: {objective}\n"
+        f"Desired Real-World Outcome: {desired_outcome or objective}\n"
+        f"Success Criteria To Achieve:\n{criteria_str}\n"
         f"Constraints: {', '.join(constraints) if constraints else 'None'}\n"
         f"Participants: {', '.join(participants) if participants else 'None'}\n"
         f"Deadline: {deadline or 'None'}\n"

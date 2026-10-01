@@ -18,6 +18,9 @@ class ExecutionSummaryItem(BaseModel):
     goal_id: str
     goal_text: str
     status: str
+    outcome: Optional[str] = None
+    evidence_level: Optional[str] = None
+    outcome_summary: Optional[str] = None
     progress: float
     started_at: datetime
     completed_at: Optional[datetime] = None
@@ -58,12 +61,21 @@ async def list_history(
     for e in executions:
         dur = None
         if e.completed_at and e.started_at:
-            dur = round((e.completed_at - e.started_at).total_seconds(), 1)
+            c_at = e.completed_at
+            s_at = e.started_at
+            if c_at.tzinfo is not None and s_at.tzinfo is None:
+                s_at = s_at.replace(tzinfo=timezone.utc)
+            elif c_at.tzinfo is None and s_at.tzinfo is not None:
+                c_at = c_at.replace(tzinfo=timezone.utc)
+            dur = round(max(0.0, (c_at - s_at).total_seconds()), 1)
         items.append(ExecutionSummaryItem(
             id=e.id,
             goal_id=e.goal_id,
             goal_text=e.goal.text if e.goal else "",
             status=e.status,
+            outcome=e.outcome,
+            evidence_level=e.evidence_level,
+            outcome_summary=e.outcome_summary,
             progress=e.progress,
             started_at=e.started_at,
             completed_at=e.completed_at,
@@ -100,6 +112,9 @@ async def get_audit_summary(
         f"# Relay Audit Summary: Execution {execution.id}",
         f"**Goal**: {execution.goal.text if execution.goal else 'N/A'}",
         f"**Status**: {execution.status.upper()}",
+        f"**Outcome**: {execution.outcome or 'N/A'}",
+        f"**Evidence Level**: {execution.evidence_level or 'N/A'}",
+        f"**Outcome Summary**: {execution.outcome_summary or 'N/A'}",
         f"**Started At**: {execution.started_at}",
         f"**Completed At**: {execution.completed_at or 'In Progress'}",
         "\n## Execution Audit Timeline",

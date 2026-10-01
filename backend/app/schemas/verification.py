@@ -12,3 +12,17 @@ class VerificationResult(BaseModel):
     evidence: Dict[str, Any] = Field(default_factory=dict)
     details: Optional[str] = None
     checked_at: datetime = Field(default_factory=utc_now)
+
+class GoalCriterionEvaluation(BaseModel):
+    criterion: str
+    status: str  # "met" | "unmet" | "not_verifiable"
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    reason: str
+
+class GoalVerificationResult(BaseModel):
+    goal_outcome: str  # "COMPLETED" | "PARTIALLY_COMPLETED" | "FAILED" | "BLOCKED" | "STOPPED" | "CANCELLED"
+    evidence_level: str  # "ACTION_REQUESTED" | "ACTION_EXECUTED" | "ACTION_VERIFIED" | "GOAL_ACHIEVED"
+    criteria_evaluations: list[GoalCriterionEvaluation] = Field(default_factory=list)
+    summary: str
+    checked_at: datetime = Field(default_factory=utc_now)
+

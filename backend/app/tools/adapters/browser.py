@@ -9,9 +9,24 @@ class PlaywrightBrowserTool(BaseTool):
     requires_connection = "browser"
     required_permissions = ["navigate", "extract"]
 
+    async def _launch_browser(self, p):
+        """Launches headless Chromium using installed Chrome, Edge, or bundled chromium."""
+        for channel in ["chrome", "msedge", None]:
+            try:
+                if channel:
+                    return await p.chromium.launch(headless=True, channel=channel)
+                else:
+                    return await p.chromium.launch(headless=True)
+            except Exception:
+                continue
+        raise RuntimeError("No supported Chromium/Chrome/Edge browser executable found on system.")
+
     async def health_check(self, credentials: Optional[str] = None) -> Tuple[bool, Optional[str]]:
         try:
             from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                b = await self._launch_browser(p)
+                await b.close()
             return True, "Playwright browser automation is ready"
         except Exception as e:
             return False, f"Playwright not initialized: {str(e)}"
@@ -32,8 +47,8 @@ class PlaywrightBrowserTool(BaseTool):
         from playwright.async_api import async_playwright
 
         async with async_playwright() as p:
-            # Launch headless chromium
-            browser = await p.chromium.launch(headless=True)
+            # Launch headless chromium (channel-aware)
+            browser = await self._launch_browser(p)
             try:
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

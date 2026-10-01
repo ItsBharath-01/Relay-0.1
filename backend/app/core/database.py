@@ -38,6 +38,20 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 async def init_db():
-    """Initializes tables in database."""
+    """Initializes tables in database and applies lightweight column migrations."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # Migration: ensure executions table has outcome, evidence_level, and outcome_summary
+        def migrate_executions(connection):
+            from sqlalchemy import inspect, text
+            inspector = inspect(connection)
+            existing_cols = {col["name"] for col in inspector.get_columns("executions")}
+            if "outcome" not in existing_cols:
+                connection.execute(text("ALTER TABLE executions ADD COLUMN outcome VARCHAR(50)"))
+            if "evidence_level" not in existing_cols:
+                connection.execute(text("ALTER TABLE executions ADD COLUMN evidence_level VARCHAR(50)"))
+            if "outcome_summary" not in existing_cols:
+                connection.execute(text("ALTER TABLE executions ADD COLUMN outcome_summary TEXT"))
+
+        await conn.run_sync(migrate_executions)

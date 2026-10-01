@@ -348,21 +348,45 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
           execUpdate = { status: "running" };
           break;
 
-        case "execution_completed":
-          execUpdate = { status: "completed", progress: 1.0, current_action: "All tasks verified and completed." };
+        case "execution_completed": {
+          const p = event.payload || {};
+          execUpdate = {
+            status: "completed",
+            progress: 1.0,
+            current_action: p.outcome_summary || "Goal evaluation completed.",
+            outcome: p.outcome || "COMPLETED",
+            evidence_level: p.evidence_level || "GOAL_ACHIEVED",
+            outcome_summary: p.outcome_summary || null,
+            criteria_evaluations: p.criteria_evaluations || [],
+          };
           get().unsubscribeFromStream();
           break;
+        }
 
-        case "execution_failed":
-          execUpdate = { status: "failed" };
+        case "execution_failed": {
+          const p = event.payload || {};
+          execUpdate = {
+            status: "failed",
+            outcome: p.outcome || "FAILED",
+            evidence_level: p.evidence_level || "ACTION_REQUESTED",
+            outcome_summary: p.outcome_summary || event.message,
+            current_action: p.outcome_summary || event.message,
+          };
           get().unsubscribeFromStream();
           break;
+        }
 
         case "execution_cancelled":
-        case "execution_stopped":
-          execUpdate = { status: "cancelled" };
+        case "execution_stopped": {
+          const p = event.payload || {};
+          execUpdate = {
+            status: "cancelled",
+            outcome: (event.type === "execution_stopped" ? "STOPPED" : "CANCELLED") as any,
+            outcome_summary: p.outcome_summary || "Execution halted by user.",
+          };
           get().unsubscribeFromStream();
           break;
+        }
       }
 
       return {

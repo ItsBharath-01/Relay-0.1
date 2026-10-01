@@ -210,10 +210,27 @@ export default function ExecutionWorkspace() {
         {/* Header */}
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h1 className="text-lg font-bold text-slate-900 mb-0.5">
-              {t(`exec.${execution.status}` as any) || execution.status}
-            </h1>
-            <p className="text-sm text-slate-500 truncate max-w-xs">{execution.goal_text}</p>
+            <div className="flex items-center gap-2 mb-1">
+              <h1 className="text-lg font-bold text-slate-900">
+                {t(`exec.${execution.status}` as any) || execution.status}
+              </h1>
+              {execution.outcome && (
+                <span className={`px-2 py-0.5 text-xs font-semibold rounded-full border ${
+                  execution.outcome === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                  : execution.outcome === 'PARTIALLY_COMPLETED' ? 'bg-amber-100 text-amber-800 border-amber-300'
+                  : execution.outcome === 'BLOCKED' ? 'bg-orange-100 text-orange-800 border-orange-300'
+                  : 'bg-rose-100 text-rose-800 border-rose-300'
+                }`}>
+                  Outcome: {execution.outcome}
+                </span>
+              )}
+              {execution.evidence_level && (
+                <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                  {execution.evidence_level}
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-slate-500 truncate max-w-md">{execution.goal_text}</p>
           </div>
           <div className="flex items-center gap-2">
             {execution.status === 'running' && (
@@ -233,6 +250,24 @@ export default function ExecutionWorkspace() {
             )}
           </div>
         </div>
+
+        {/* Outcome Summary Banner if finished */}
+        {execution.outcome_summary && (
+          <div className={`mb-5 p-4 rounded-xl border text-sm ${
+            execution.outcome === 'COMPLETED' ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+            : execution.outcome === 'BLOCKED' ? 'bg-amber-50 border-amber-200 text-amber-900'
+            : execution.outcome === 'PARTIALLY_COMPLETED' ? 'bg-amber-50 border-amber-200 text-amber-900'
+            : 'bg-rose-50 border-rose-200 text-rose-900'
+          }`}>
+            <div className="flex items-start gap-2.5">
+              <Shield className="w-4 h-4 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold mb-0.5">Outcome Assessment ({execution.outcome || execution.status})</p>
+                <p className="text-xs leading-relaxed opacity-95">{execution.outcome_summary}</p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Progress bar */}
         <div className="mb-5">
@@ -311,6 +346,37 @@ export default function ExecutionWorkspace() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Goal Success Criteria Evaluations */}
+        {execution.criteria_evaluations && execution.criteria_evaluations.length > 0 && (
+          <div className="mb-4 bg-white border border-slate-200 rounded-xl p-4">
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+              <Shield className="w-3.5 h-3.5 text-primary-600" />
+              Success Criteria Evaluation
+            </h3>
+            <div className="space-y-2">
+              {execution.criteria_evaluations.map((c, idx) => (
+                <div key={idx} className={`p-2.5 rounded-lg border text-xs flex items-start gap-2.5 ${
+                  c.status === 'met' ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950'
+                  : c.status === 'not_verifiable' ? 'bg-amber-50/60 border-amber-200 text-amber-950'
+                  : 'bg-rose-50/60 border-rose-200 text-rose-950'
+                }`}>
+                  {c.status === 'met' ? (
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  ) : c.status === 'not_verifiable' ? (
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  ) : (
+                    <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1">
+                    <p className="font-semibold">{c.criterion}</p>
+                    <p className="text-[11px] text-slate-600 mt-0.5">{c.reason}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

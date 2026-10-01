@@ -1,5 +1,5 @@
-from typing import Dict, Any, Optional, Tuple
-from app.schemas.verification import VerificationResult
+from typing import Dict, Any, Optional, Tuple, List
+from app.schemas.verification import VerificationResult, GoalVerificationResult, GoalCriterionEvaluation
 from app.tools.registry import get_tool
 
 class VerificationEngine:
@@ -161,9 +161,38 @@ class VerificationEngine:
                     details="Email dispatch failed."
                 )
 
-        # 6. Playwright Browser Navigation Verification
+        # 6. Playwright Browser Navigation & Media Verification
         if capability_id == "browser_navigate" or "browser" in action:
             current_url = result.get("current_url") or result.get("url")
+            # If the action involves media playback (e.g. music/audio/video play)
+            is_playback_intent = any(
+                term in action.lower() or term in str(params).lower()
+                for term in ["play", "music", "song", "audio", "video", "media", "stream"]
+            )
+            if is_playback_intent:
+                player_state = result.get("player_state") or result.get("is_playing")
+                if player_state in [True, "playing"]:
+                    return VerificationResult(
+                        criterion="Verify media playback actively started in browser",
+                        method="DOM audio/video element playback inspection",
+                        result="passed",
+                        evidence={"url": current_url, "player_state": "playing"},
+                        details="Audio/video playback element verified playing."
+                    )
+                else:
+                    return VerificationResult(
+                        criterion="Verify media playback actively started in browser",
+                        method="DOM audio/video element playback inspection",
+                        result="not_verifiable",
+                        evidence={
+                            "url": current_url,
+                            "title": result.get("title"),
+                            "player_state": player_state or "unknown",
+                            "note": "Page was loaded, but active audio playback could not be independently verified."
+                        },
+                        details="Cannot independently confirm audio/media stream is playing."
+                    )
+
             if current_url:
                 return VerificationResult(
                     criterion=f"Verify browser navigation to '{current_url}'",
@@ -203,4 +232,138 @@ class VerificationEngine:
             details="Action completed with structured output."
         )
 
+    async def verify_goal_outcome(
+        self,
+        goal_text: str,
+        desired_outcome: Optional[str],
+        success_criteria: List[str],
+        tasks: List[Any],
+        task_verifications: List[Any],
+        terminal_reason: Optional[str] = None
+    ) -> GoalVerificationResult:
+        """
+        Universal Goal Verification: Answers 'Did Relay accomplish what the user actually asked?'
+        Evaluates task statuses, individual task verification evidence, declared success criteria,
+        and tool limitations to determine genuine goal outcome and evidence level.
+        """
+        # Determine overall task status distribution
+        total_tasks = len(tasks)
+        completed_tasks = [t for t in tasks if getattr(t, "status", None) == "completed"]
+        failed_tasks = [t for t in tasks if getattr(t, "status", None) == "failed"]
+        blocked_tasks = [t for t in tasks if getattr(t, "status", None) in ["blocked", "pending"] and terminal_reason == "blocked"]
+        rejected_tasks = [t for t in tasks if getattr(t, "status", None) == "rejected"]
+
+        # Aggregate evidence from all task verifications
+        passed_v = [v for v in task_verifications if getattr(v, "result", None) == "passed"]
+        not_verifiable_v = [v for v in task_verifications if getattr(v, "result", None) == "not_verifiable"]
+        failed_v = [v for v in task_verifications if getattr(v, "result", None) == "failed"]
+
+        # 1. Blocked or Stopped
+        if terminal_reason == "blocked" or any(getattr(t, "status", None) == "blocked" for t in tasks):
+            if completed_tasks:
+                outcome = "PARTIALLY_COMPLETED"
+                ev_level = "ACTION_EXECUTED"
+                summary = f"Partial completion: {len(completed_tasks)} of {total_tasks} tasks completed, but remaining steps are blocked due to missing capability or tool."
+            else:
+                outcome = "BLOCKED"
+                ev_level = "ACTION_REQUESTED"
+                summary = "Goal cannot be completed: required capability or authorized connection is unavailable."
+            return GoalVerificationResult(
+                goal_outcome=outcome,
+                evidence_level=ev_level,
+                criteria_evaluations=[],
+                summary=summary
+            )
+
+        if terminal_reason == "stopped" or rejected_tasks:
+            outcome = "STOPPED"
+            ev_level = "ACTION_REQUESTED"
+            summary = "Goal execution stopped because user rejected an approval request."
+            return GoalVerificationResult(
+                goal_outcome=outcome,
+                evidence_level=ev_level,
+                criteria_evaluations=[],
+                summary=summary
+            )
+
+        if terminal_reason == "cancelled":
+            outcome = "CANCELLED"
+            ev_level = "ACTION_REQUESTED"
+            summary = "Goal execution was cancelled by user."
+            return GoalVerificationResult(
+                goal_outcome=outcome,
+                evidence_level=ev_level,
+                criteria_evaluations=[],
+                summary=summary
+            )
+
+        # 2. Failed tasks
+        if failed_tasks or failed_v:
+            if completed_tasks:
+                outcome = "PARTIALLY_COMPLETED"
+                ev_level = "ACTION_EXECUTED"
+                summary = f"Goal partially completed: {len(completed_tasks)} of {total_tasks} tasks finished, but task failure occurred."
+            else:
+                outcome = "FAILED"
+                ev_level = "ACTION_EXECUTED"
+                summary = "Goal execution failed: one or more required actions could not complete."
+            return GoalVerificationResult(
+                goal_outcome=outcome,
+                evidence_level=ev_level,
+                criteria_evaluations=[],
+                summary=summary
+            )
+
+        # 3. Evaluate Success Criteria against verified evidence
+        criteria_evals: List[GoalCriterionEvaluation] = []
+        if success_criteria:
+            for sc in success_criteria:
+                if not_verifiable_v:
+                    criteria_evals.append(GoalCriterionEvaluation(
+                        criterion=sc,
+                        status="not_verifiable",
+                        evidence={},
+                        reason="Action executed, but resulting state could not be independently confirmed."
+                    ))
+                elif passed_v:
+                    criteria_evals.append(GoalCriterionEvaluation(
+                        criterion=sc,
+                        status="met",
+                        evidence={"verified_tasks": len(passed_v)},
+                        reason="Verified by independent task outcome evidence."
+                    ))
+                else:
+                    criteria_evals.append(GoalCriterionEvaluation(
+                        criterion=sc,
+                        status="unmet",
+                        evidence={},
+                        reason="No verified task evidence confirms this criterion."
+                    ))
+
+        # Check if any outcome was not verifiable (e.g. media playback)
+        if not_verifiable_v:
+            outcome = "PARTIALLY_COMPLETED"
+            ev_level = "ACTION_EXECUTED"
+            summary = f"All {total_tasks} planned actions executed, but real-world outcome could not be independently verified (e.g. playback/state unobservable)."
+        elif len(completed_tasks) == total_tasks and total_tasks > 0 and len(passed_v) >= total_tasks:
+            outcome = "COMPLETED"
+            ev_level = "GOAL_ACHIEVED"
+            summary = f"Goal fully achieved and verified against {len(passed_v)} independent state checks."
+        elif completed_tasks:
+            outcome = "PARTIALLY_COMPLETED"
+            ev_level = "ACTION_VERIFIED"
+            summary = f"Completed {len(completed_tasks)} of {total_tasks} tasks with verified outcomes."
+        else:
+            outcome = "FAILED"
+            ev_level = "ACTION_REQUESTED"
+            summary = "Goal execution produced no verified task outcomes."
+
+        return GoalVerificationResult(
+            goal_outcome=outcome,
+            evidence_level=ev_level,
+            criteria_evaluations=criteria_evals,
+            summary=summary
+        )
+
 verification_engine = VerificationEngine()
+

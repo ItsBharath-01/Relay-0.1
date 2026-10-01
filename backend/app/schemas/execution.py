@@ -52,6 +52,9 @@ class ExecutionDetailSchema(BaseModel):
     goal_text: str
     plan_id: str
     status: str
+    outcome: Optional[str] = None
+    evidence_level: Optional[str] = None
+    outcome_summary: Optional[str] = None
     progress: float
     current_task_id: Optional[str] = None
     current_action: Optional[str] = None

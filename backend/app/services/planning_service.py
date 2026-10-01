@@ -48,6 +48,8 @@ class PlanningService:
 
         understanding = goal.understanding or {}
         objective = understanding.get("objective", goal.text)
+        desired_outcome = understanding.get("desired_outcome")
+        success_criteria = understanding.get("success_criteria", [])
         constraints = understanding.get("constraints", [])
         participants = understanding.get("participants", [])
         deadline = understanding.get("deadline")
@@ -61,7 +63,9 @@ class PlanningService:
             participants=participants,
             deadline=deadline,
             required_capabilities=required_caps,
-            language=goal.language or "en"
+            language=goal.language or "en",
+            desired_outcome=desired_outcome,
+            success_criteria=success_criteria
         )
 
         # Generate plan via LLM

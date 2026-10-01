@@ -54,7 +54,11 @@ class GoalUnderstanding(BaseModel):
     objective: str = Field(description="Clear, concise summary of what the user wants to accomplish.")
     constraints: List[str] = Field(default_factory=list, description="Any boundaries, limits, preferences or rules.")
     participants: List[str] = Field(default_factory=list, description="People, teams, or services mentioned.")
-    deadline: Optional[str] = Field(default=None, description="Target completion date/time or deadline if mentioned, or null.")
+    desired_outcome: Optional[str] = Field(default=None, description="The real-world end outcome the user expects upon completion.")
+    success_criteria: List[str] = Field(
+        default_factory=list,
+        description="Explicit, checkable conditions describing what proves the user's objective was genuinely achieved."
+    )
     required_capabilities: List[CapabilityId] = Field(
         default_factory=list,
         description="List of capability IDs needed to achieve the goal. Must strictly be from the allowed registry enum."
@@ -87,6 +91,25 @@ class GoalUnderstanding(BaseModel):
                 elif c_str in CAPABILITY_ALIASES:
                     normalized.append(CAPABILITY_ALIASES[c_str])
             data["required_capabilities"] = normalized
+
+            # Normalize clarification_questions: LLMs often output list of strings instead of ClarificationQuestion dicts
+            raw_questions = data.get("clarification_questions", [])
+            normalized_q = []
+            for i, q in enumerate(raw_questions, start=1):
+                if isinstance(q, str):
+                    normalized_q.append({
+                        "id": f"q_{i}",
+                        "question": q,
+                        "options": [],
+                        "allow_custom": True
+                    })
+                elif isinstance(q, dict):
+                    if "id" not in q:
+                        q["id"] = f"q_{i}"
+                    if "question" not in q:
+                        q["question"] = q.get("text", "")
+                    normalized_q.append(q)
+            data["clarification_questions"] = normalized_q
         return data
 
 class GoalUnderstandRequest(BaseModel):

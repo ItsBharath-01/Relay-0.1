@@ -125,6 +125,9 @@ class Execution(Base):
     plan_id = Column(String(36), ForeignKey("plans.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     status = Column(String(50), default="running") # running, paused, waiting_approval, completed, failed, cancelled, stopped
+    outcome = Column(String(50), nullable=True) # COMPLETED, PARTIALLY_COMPLETED, FAILED, BLOCKED, CANCELLED, STOPPED
+    evidence_level = Column(String(50), nullable=True) # ACTION_REQUESTED, ACTION_EXECUTED, ACTION_VERIFIED, GOAL_ACHIEVED
+    outcome_summary = Column(Text, nullable=True)
     progress = Column(Float, default=0.0)
     current_task_id = Column(String(36), nullable=True)
     current_action = Column(String(255), nullable=True)

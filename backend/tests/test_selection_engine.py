@@ -176,11 +176,13 @@ async def test_web_search_selected_without_connection():
     engine = ToolSelectionEngine()
     db = make_db([])
 
-    record = await engine.evaluate_candidates(
-        user_id="user-1",
-        capability_id="web_search",
-        db=db,
-    )
+    with patch("app.tools.adapters.web_search.WebSearchTool.health_check", new_callable=AsyncMock) as mock_hc:
+        mock_hc.return_value = (True, "Web search service is online")
+        record = await engine.evaluate_candidates(
+            user_id="user-1",
+            capability_id="web_search",
+            db=db,
+        )
 
     assert record.selected_tool_id == "web_search_engine"
     ws_check = next(c for c in record.candidate_checks if c.tool_id == "web_search_engine")
