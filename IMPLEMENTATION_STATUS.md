@@ -231,3 +231,38 @@ tests/test_mcp_connections.py — 4 passed, 0 failed
 Full regression suite — 82 passed, 0 failed (P0+P1+P2-1 regressions: none)
 Frontend build — 1646 modules, exit code 0, 0 TypeScript errors
 `
+
+## 🔌 P2-3 Completed Phase: Core Connectors (GitHub, Slack, Filesystem, REST)
+
+### Summary
+Built production-grade, secure adapters for GitHub (REST API), Slack (Web API), Local Filesystem (sandboxed iofiles), and Generic REST (SSRF-protected).
+
+### Implemented Adapters & Capabilities
+- **GitHub (github.py)**: issue_create, issue_read with real GitHub REST API integration, Bearer authentication, and independent state verification.
+- **Slack (slack.py)**: message_send via chat.postMessage, error handling on non-ok payloads, and Bot Token protection.
+- **Local Filesystem (ilesystem.py)**: Sandboxed file reader bounded strictly by RELAY_WORKSPACE_ROOT, blocking path traversal escapes (../, absolute paths) with a 10MB limit and 8,000 char response truncation.
+- **Generic REST Connector (
+est.py)**: Robust SSRF defense resolving domain IPs and blocking RFC-1918 private ranges, AWS/GCP metadata (169.254.169.254), loopbacks, and link-local ranges, with a maximum 3 redirect limit.
+
+---
+
+## 🗂️ P2-4 & P2-5 Completed Phase: Application Catalog, Tool Selection & Frontend Architecture
+
+### Summary
+Unified integration discovery and runtime selection via a central AppDefinition catalog, dedicated health verification endpoints, and a refreshed dashboard and connections workspace.
+
+### Backend Implementation
+- **Application Catalog (pp/catalog/apps.py)**: Registry of 11 applications with connection types, required permissions, risk profiles, and capability mappings.
+- **Catalog API (pp/api/catalog.py)**: Public GET /catalog and GET /catalog/{app_id} endpoints.
+- **Connection Health Checks (pp/api/connections.py)**: Real GET /connections/{id}/health executing live 	ool.health_check().
+- **Tool Selection Engine Integration (	est_selection_engine.py)**: 9 integration tests verifying capability matching, connection prerequisites, permission filtering, and failure exclusions.
+- **Lifespan Modernization**: Converted pp/main.py startup handler to standard FastAPI @asynccontextmanager async def lifespan(app: FastAPI) pattern.
+
+### Frontend Implementation
+- **Catalog UI & Management (Connections.tsx)**: Grouped sections for Connected apps, Available integrations by category, and Coming Soon placeholders with inline token configuration.
+- **Connection Details (ConnectionDetail.tsx)**: Dedicated /connections/:appId view with live health checks, granular permission toggles, and setup documentation.
+- **Dashboard Upgrades (Dashboard.tsx)**: Added real-time Connection Health Bar displaying active app statuses, degraded connection alerts, and navigation shortcuts.
+
+### Final Verification Numbers
+- **Backend Test Suite**: 127 passed, 0 failed
+- **Frontend Build**: 1638 modules transformed, exit code 0, 0 TypeScript errors
