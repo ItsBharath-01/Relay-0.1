@@ -1,182 +1,406 @@
-import { MCPRegistrationModal, Button } from '../components/ui'
-import { useEffect, useState } from 'react'
-import { Plug, Lock, Unlock, ExternalLink } from 'lucide-react'
-import { useConnectionStore } from '../stores/connectionStore'
-import { useUIStore } from '../stores/uiStore'
-import { useTranslation } from '../i18n/i18nContext'
-import { AppShell } from '../components/layout/AppShell'
-import type { Connection } from '../types'
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Plug, RefreshCw, Zap, CheckCircle, AlertTriangle, Clock, ExternalLink } from "lucide-react";
+import { useConnectionStore } from "../stores/connectionStore";
+import type { AppDefinition } from "../stores/connectionStore";
+import type { Connection } from "../types";
+import { Button } from "../components/ui/Button";
+import { Input } from "../components/ui/Input";
+import { Card } from "../components/ui/Card";
+import { Badge } from "../components/ui/Badge";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Skeleton } from "../components/ui/Skeleton";
+import { useUIStore } from "../stores/uiStore";
 
-const APP_ICONS: Record<string, string> = {
-  google_calendar: '📅', gmail: '📧', browser: '🌐',
-  slack: '💬', github: '🐙', mcp: '🤖', rest_connector: '🔌',
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+type FilterTab = "all" | "connected" | "available" | "coming_soon";
+
+const CATEGORY_LABELS: Record<string, string> = {
+  productivity: "Productivity",
+  communication: "Communication",
+  developer: "Developer",
+  browser: "Browser",
+  local: "Local",
+  api: "APIs",
+};
+
+function statusColor(status: string) {
+  if (status === "connected") return "green";
+  if (status === "needs_reconnection") return "red";
+  if (status === "not_connected") return "slate";
+  return "amber";
 }
 
-function ConnectionCard({ conn }: { conn: Connection }) {
-  const { t } = useTranslation()
-  const { togglePermission, disconnectApp } = useConnectionStore()
-  const { addToast } = useUIStore()
-  const [expanded, setExpanded] = useState(false)
+function StatusIcon({ status }: { status: string }) {
+  if (status === "connected") return <CheckCircle size={14} className="text-green-500" />;
+  if (status === "needs_reconnection") return <AlertTriangle size={14} className="text-red-500" />;
+  return <Clock size={14} className="text-slate-400" />;
+}
 
-  const isSoon = conn.status === 'coming_soon'
-  const isConnected = conn.status === 'connected'
+// ── Connected App Card ────────────────────────────────────────────────────────
 
-  const statusConfig: Record<string, { cls: string; dot: string; label: string }> = {
-    connected: { cls: 'text-emerald-700 bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500', label: 'Connected' },
-    not_connected: { cls: 'text-slate-600 bg-slate-50 border-slate-200', dot: 'bg-slate-400', label: 'Not connected' },
-    coming_soon: { cls: 'text-purple-700 bg-purple-50 border-purple-200', dot: 'bg-purple-400', label: 'Coming soon' },
-    error: { cls: 'text-rose-700 bg-rose-50 border-rose-200', dot: 'bg-rose-500', label: 'Error' },
-    needs_reconnection: { cls: 'text-amber-700 bg-amber-50 border-amber-200', dot: 'bg-amber-400 animate-pulse', label: 'Needs reconnection' },
-  }
-  const sc = statusConfig[conn.status] || statusConfig.not_connected
+function ConnectedCard({ conn, appDef }: { conn: Connection; appDef: AppDefinition | undefined }) {
+  const { disconnectApp, testConnectionHealth } = useConnectionStore();
+  const { addToast } = useUIStore();
+  const navigate = useNavigate();
+  const [testing, setTesting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
 
-  const handleTogglePerm = async (key: string, granted: boolean) => {
+  const name = appDef?.name ?? conn.app_id;
+  const emoji = appDef?.icon_emoji ?? "🔌";
+
+  async function handleTest() {
+    setTesting(true);
     try {
-      await togglePermission(conn.id, key, granted)
-      addToast({ type: 'success', message: `Permission ${granted ? 'granted' : 'revoked'}.` })
-    } catch (e: any) {
-      addToast({ type: 'error', message: e.message || 'Failed to update permission.' })
+      const result = await testConnectionHealth(conn.id);
+      addToast({
+        type: result.status === "healthy" ? "success" : "error",
+        title: result.status === "healthy" ? "Connection healthy" : "Connection issue",
+        message: result.message,
+      });
+    } catch {
+      addToast({ type: "error", title: "Test failed", message: "Could not reach health endpoint." });
+    } finally {
+      setTesting(false);
     }
   }
 
-  const handleDisconnect = async () => {
+  async function handleDisconnect() {
+    if (!confirm(`Disconnect ${name}? Relay will no longer be able to access this service.`)) return;
+    setDisconnecting(true);
     try {
-      await disconnectApp(conn.id)
-      addToast({ type: 'success', message: `${conn.name} disconnected.` })
-    } catch (e: any) {
-      addToast({ type: 'error', message: e.message || 'Failed to disconnect.' })
+      await disconnectApp(conn.id);
+      addToast({ type: "success", title: "Disconnected", message: `${name} has been disconnected.` });
+    } catch {
+      addToast({ type: "error", title: "Error", message: "Could not disconnect." });
+    } finally {
+      setDisconnecting(false);
     }
   }
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-      <div className="flex items-center gap-4 p-4">
-        <span className="text-2xl shrink-0">{APP_ICONS[conn.app_id] || '🔌'}</span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold text-slate-900">{conn.name}</h3>
-            <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium ${sc.cls}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />
-              {sc.label}
-            </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-0.5">Auth: {conn.auth_type}</p>
+    <Card className="flex items-start gap-3 p-4">
+      <div className="text-2xl mt-0.5">{emoji}</div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="font-medium text-slate-900">{name}</span>
+          <StatusIcon status={conn.status} />
+          <Badge label={conn.status.replace("_", " ")} color={statusColor(conn.status) as never} size="sm" />
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {isSoon && (
-            <span className="text-xs text-purple-600 font-medium">Coming soon</span>
-          )}
-          {!isSoon && !isConnected && (
-            <a
-              href="/connections"
-              className="text-xs text-primary-600 font-medium hover:underline flex items-center gap-1"
-              onClick={(e) => { e.preventDefault(); alert('OAuth flow requires server-side callback setup. Add your Google OAuth credentials to backend/.env') }}
-            >
-              Connect <ExternalLink className="w-3 h-3" />
-            </a>
-          )}
-          {isConnected && conn.app_id !== 'browser' && (
-            <button onClick={handleDisconnect} className="text-xs text-rose-600 hover:underline">
-              {t('common.disconnect')}
-            </button>
-          )}
-          {conn.permissions.length > 0 && !isSoon && (
-            <button
-              onClick={() => setExpanded(!expanded)}
-              className="text-xs text-slate-500 hover:text-slate-700 px-2 py-1 rounded border border-slate-200 hover:bg-slate-50"
-            >
-              {expanded ? 'Hide' : 'Permissions'}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Permissions panel */}
-      {expanded && conn.permissions.length > 0 && (
-        <div className="border-t border-slate-100 px-4 py-3 bg-slate-50">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Granular Permissions</p>
-          <div className="space-y-2">
-            {conn.permissions.map((perm) => (
-              <label key={perm.key} className="flex items-center justify-between gap-3 cursor-pointer">
-                <div className="flex items-center gap-2">
-                  {perm.is_sensitive ? (
-                    <Lock className="w-3 h-3 text-amber-500 shrink-0" />
-                  ) : (
-                    <Unlock className="w-3 h-3 text-slate-400 shrink-0" />
-                  )}
-                  <span className="text-xs text-slate-700">{perm.label}</span>
-                  {perm.is_sensitive && (
-                    <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">sensitive</span>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={perm.is_granted}
-                  onClick={() => handleTogglePerm(perm.key, !perm.is_granted)}
-                  className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-1 ${
-                    perm.is_granted ? 'bg-primary-600' : 'bg-slate-300'
-                  }`}
-                >
-                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition ${perm.is_granted ? 'translate-x-4' : 'translate-x-0'}`} />
-                </button>
-              </label>
+        {appDef && (
+          <div className="flex flex-wrap gap-1 mb-2">
+            {appDef.capabilities.map((cap) => (
+              <Badge key={cap} label={cap.replace("_", " ")} color="blue" size="sm" />
             ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-
-export default function Connections() {
-  const { t } = useTranslation()
-  const { connections, isLoading, fetchConnections } = useConnectionStore()
-  const [isMCPModalOpen, setIsMCPModalOpen] = useState(false)
-
-  useEffect(() => {
-    fetchConnections()
-  }, [fetchConnections])
-
-  return (
-    <AppShell>
-      <div className="max-w-2xl mx-auto px-4 py-8">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <Plug className="w-5 h-5 text-primary-600" />
-            <h1 className="text-xl font-bold text-slate-900">{t('nav.connections')}</h1>
-          </div>
-          <Button variant="outline" size="sm" onClick={() => setIsMCPModalOpen(true)}>
-            + Add MCP Server
-          </Button>
-        </div>
-        <p className="text-sm text-slate-500 mb-6">
-          Relay uses only the applications you connect, with granular permission control. All credentials are encrypted at rest.
-        </p>
-
-        {isLoading ? (
-          <div className="space-y-3">
-            {[1, 2, 3].map(i => (
-              <div key={i} className="h-20 bg-slate-100 rounded-xl animate-pulse" />
-            ))}
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {connections.map(conn => (
-              <ConnectionCard key={conn.id} conn={conn} />
-            ))}
-            {connections.length === 0 && (
-              <div className="text-center py-12 text-slate-400 text-sm">No connections found.</div>
-            )}
           </div>
         )}
+        <div className="flex gap-2 flex-wrap mt-2">
+          <Button size="sm" variant="outline" onClick={handleTest} isLoading={testing}>
+            <RefreshCw size={12} className="mr-1" /> Test
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => navigate(`/connections/${conn.app_id}`)}>
+            <ExternalLink size={12} className="mr-1" /> Manage
+          </Button>
+          <Button size="sm" variant="ghost" onClick={handleDisconnect} isLoading={disconnecting}
+            className="text-red-600 hover:text-red-700">
+            Disconnect
+          </Button>
+        </div>
       </div>
-      
-      <MCPRegistrationModal 
-        isOpen={isMCPModalOpen} 
-        onClose={() => setIsMCPModalOpen(false)} 
+    </Card>
+  );
+}
+
+// ── Inline Connect Form ────────────────────────────────────────────────────────
+
+function ConnectForm({ app, onDone }: { app: AppDefinition; onDone: () => void }) {
+  const { initConnection, connectWithToken } = useConnectionStore();
+  const { addToast } = useUIStore();
+  const [token, setToken] = useState("");
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const connId = await initConnection(app.app_id);
+      const value = app.connection_type === "url_config" || app.connection_type === "mcp" ? url : token;
+      await connectWithToken(connId, value);
+      addToast({ type: "success", title: "Connected!", message: `${app.name} is now connected.` });
+      onDone();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Connection failed";
+      addToast({ type: "error", title: "Connection failed", message: msg });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (app.connection_type === "oauth") {
+    return (
+      <div className="mt-3 rounded-lg bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
+        <strong>OAuth required.</strong> {app.auth_instructions} Live OAuth is available when Google Cloud credentials are configured on the server.
+      </div>
+    );
+  }
+
+  if (app.connection_type === "local") {
+    async function handleLocal() {
+      setLoading(true);
+      try {
+        await initConnection(app.app_id);
+        addToast({ type: "success", title: "Enabled", message: `${app.name} is ready.` });
+        onDone();
+      } catch {
+        addToast({ type: "error", title: "Error", message: "Could not enable local tool." });
+      } finally {
+        setLoading(false);
+      }
+    }
+    return (
+      <div className="mt-3">
+        <p className="text-xs text-slate-500 mb-2">{app.auth_instructions}</p>
+        <Button size="sm" onClick={handleLocal} isLoading={loading}>Enable</Button>
+      </div>
+    );
+  }
+
+  const isUrlBased = app.connection_type === "url_config" || app.connection_type === "mcp";
+
+  return (
+    <form onSubmit={handleSubmit} className="mt-3 flex gap-2">
+      <Input
+        type={isUrlBased ? "url" : "password"}
+        placeholder={isUrlBased ? "https://..." : app.auth_label}
+        value={isUrlBased ? url : token}
+        onChange={(e) => isUrlBased ? setUrl(e.target.value) : setToken(e.target.value)}
+        className="flex-1 text-sm"
+        required
       />
-    </AppShell>
-  )
+      <Button type="submit" size="sm" isLoading={loading}>Connect</Button>
+    </form>
+  );
+}
+
+// ── Catalog App Card ──────────────────────────────────────────────────────────
+
+function CatalogCard({ app }: { app: AppDefinition }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <Card className="p-4">
+      <div className="flex items-start gap-3">
+        <div className="text-2xl mt-0.5">{app.icon_emoji}</div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="font-medium text-slate-900">{app.name}</span>
+            <Badge label={app.connection_type.replace("_", " ")} color="indigo" size="sm" />
+          </div>
+          <p className="text-xs text-slate-500 mb-2">{app.description}</p>
+          <div className="flex flex-wrap gap-1 mb-2">
+            {app.capabilities.map((cap) => (
+              <Badge key={cap} label={cap.replace("_", " ")} color="blue" size="sm" />
+            ))}
+          </div>
+          {!expanded && (
+            <Button size="sm" variant="outline" onClick={() => setExpanded(true)}>
+              <Plug size={12} className="mr-1" /> Connect
+            </Button>
+          )}
+          {expanded && <ConnectForm app={app} onDone={() => setExpanded(false)} />}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ── Main Page ─────────────────────────────────────────────────────────────────
+
+export default function Connections() {
+  const { connections, catalog, isLoading, catalogLoading, fetchConnections, fetchCatalog } = useConnectionStore();
+  const [filter, setFilter] = useState<FilterTab>("all");
+  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string>("all");
+
+  useEffect(() => {
+    fetchConnections();
+    fetchCatalog();
+  }, [fetchConnections, fetchCatalog]);
+
+  const connectedAppIds = new Set(
+    connections.filter((c) => c.status !== "not_connected").map((c) => c.app_id)
+  );
+
+  // Build lookup: app_id → AppDefinition
+  const catalogMap = new Map(catalog.map((a) => [a.app_id, a]));
+
+  // Active connections (user has a row with non-empty/not_connected status)
+  const activeConnections = connections.filter((c) => c.status !== "not_connected");
+
+  // Available catalog apps the user hasn't connected yet
+  const availableCatalog = catalog.filter(
+    (a) => a.available && !connectedAppIds.has(a.app_id)
+  );
+
+  // Coming-soon
+  const comingSoon = catalog.filter((a) => !a.available);
+
+  // Search filter helper
+  function matchesSearch(name: string, description: string) {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return name.toLowerCase().includes(q) || description.toLowerCase().includes(q);
+  }
+
+  const categories = ["all", ...Array.from(new Set(availableCatalog.map((a) => a.category)))];
+
+  const filteredAvailable = availableCatalog
+    .filter((a) => matchesSearch(a.name, a.description))
+    .filter((a) => activeCategory === "all" || a.category === activeCategory);
+
+  if (isLoading && catalogLoading) {
+    return (
+      <div className="p-6 space-y-4">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-4 w-full" />
+        <Skeleton className="h-4 w-3/4" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 max-w-4xl mx-auto space-y-8">
+      {/* Header */}
+      <div>
+        <h1 className="text-2xl font-bold text-slate-900">Connections</h1>
+        <p className="text-slate-500 text-sm mt-1">
+          Connect apps and services so Relay can take real actions on your behalf.
+        </p>
+      </div>
+
+      {/* Search + Filter */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        <Input
+          placeholder="Search integrations…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="flex-1"
+        />
+        <div className="flex gap-1">
+          {(["all", "connected", "available", "coming_soon"] as FilterTab[]).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                filter === f
+                  ? "bg-violet-100 text-violet-700"
+                  : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              {f === "coming_soon" ? "Coming soon" : f.charAt(0).toUpperCase() + f.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Section 1 — Connected */}
+      {(filter === "all" || filter === "connected") && (
+        <section>
+          <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wide mb-3 flex items-center gap-2">
+            <CheckCircle size={14} className="text-green-500" />
+            Connected ({activeConnections.filter((c) => matchesSearch(catalogMap.get(c.app_id)?.name ?? c.app_id, "")).length})
+          </h2>
+          {activeConnections.length === 0 ? (
+            <EmptyState
+              icon={<Plug size={32} className="text-slate-300" />}
+              title="No apps connected"
+              description="Connect apps below so Relay can take real actions."
+            />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {activeConnections
+                .filter((c) => matchesSearch(catalogMap.get(c.app_id)?.name ?? c.app_id, ""))
+                .map((conn) => (
+                  <ConnectedCard
+                    key={conn.id}
+                    conn={conn}
+                    appDef={catalogMap.get(conn.app_id)}
+                  />
+                ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Section 2 — Available */}
+      {(filter === "all" || filter === "available") && (
+        <section>
+          <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wide mb-3 flex items-center gap-2">
+            <Zap size={14} className="text-blue-500" />
+            Available Integrations
+          </h2>
+
+          {/* Category tabs */}
+          <div className="flex flex-wrap gap-1 mb-4">
+            {categories.map((cat) => (
+              <button
+                key={cat}
+                onClick={() => setActiveCategory(cat)}
+                className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  activeCategory === cat
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "border-slate-200 text-slate-600 hover:border-slate-400"
+                }`}
+              >
+                {cat === "all" ? "All" : CATEGORY_LABELS[cat] ?? cat}
+              </button>
+            ))}
+          </div>
+
+          {filteredAvailable.length === 0 ? (
+            <EmptyState
+              icon={<Plug size={32} className="text-slate-300" />}
+              title="No integrations available"
+              description={search ? "Try a different search term." : "All available integrations are already connected."}
+            />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {filteredAvailable.map((app) => (
+                <CatalogCard key={app.app_id} app={app} />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Section 3 — Coming soon */}
+      {(filter === "all" || filter === "coming_soon") && comingSoon.length > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wide mb-3">
+            Coming Soon
+          </h2>
+          <div className="grid gap-3 sm:grid-cols-2 opacity-60">
+            {comingSoon
+              .filter((a) => matchesSearch(a.name, a.description))
+              .map((app) => (
+                <Card key={app.app_id} className="p-4 cursor-not-allowed">
+                  <div className="flex items-start gap-3">
+                    <div className="text-2xl mt-0.5 grayscale">{app.icon_emoji}</div>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="font-medium text-slate-700">{app.name}</span>
+                        <Badge label="Coming soon" color="slate" size="sm" />
+                      </div>
+                      <p className="text-xs text-slate-400">{app.description}</p>
+                    </div>
+                  </div>
+                </Card>
+              ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
 }

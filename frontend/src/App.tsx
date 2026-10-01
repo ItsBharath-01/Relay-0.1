@@ -17,6 +17,7 @@ const ExecutionWorkspace = React.lazy(() => import('./pages/ExecutionWorkspace')
 const ExecutionSummary = React.lazy(() => import('./pages/ExecutionSummary'))
 const Approvals = React.lazy(() => import('./pages/Approvals'))
 const Connections = React.lazy(() => import('./pages/Connections'))
+const ConnectionDetail = React.lazy(() => import('./pages/ConnectionDetail'))
 const History = React.lazy(() => import('./pages/History'))
 const Settings = React.lazy(() => import('./pages/Settings'))
 const Help = React.lazy(() => import('./pages/Help'))
@@ -74,6 +75,7 @@ function App() {
         <Route path="/execution/:executionId/summary" element={<ProtectedPage><ExecutionSummary /></ProtectedPage>} />
         <Route path="/approvals" element={<ProtectedPage><Approvals /></ProtectedPage>} />
         <Route path="/connections" element={<ProtectedPage><Connections /></ProtectedPage>} />
+        <Route path="/connections/:appId" element={<ProtectedPage><ConnectionDetail /></ProtectedPage>} />
         <Route path="/history" element={<ProtectedPage><History /></ProtectedPage>} />
         <Route path="/settings" element={<ProtectedPage><Settings /></ProtectedPage>} />
         <Route path="/help" element={<ProtectedPage><Help /></ProtectedPage>} />

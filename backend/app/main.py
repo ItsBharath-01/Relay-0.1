@@ -13,6 +13,7 @@ from app.api.approvals import router as approvals_router
 from app.api.connections import router as connections_router
 from app.api.history import router as history_router
 from app.api.voice import router as voice_router
+from app.api.catalog import router as catalog_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("relay")
@@ -45,6 +46,7 @@ routers = [
     connections_router,
     history_router,
     voice_router,
+    catalog_router,
 ]
 
 for r in routers:
