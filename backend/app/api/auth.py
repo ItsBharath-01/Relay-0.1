@@ -59,11 +59,10 @@ DEFAULT_APP_CONNECTIONS = [
     {
         "app_id": "github",
         "name": "GitHub",
-        "auth_type": "oauth2",
-        "status": "coming_soon",
+        "auth_type": "api_token",
+        "status": "not_connected",
         "permissions": [
-            {"key": "read", "label": "Read issues and repos", "is_sensitive": False},
-            {"key": "create_issue", "label": "Create new issues", "is_sensitive": False},
+            {"key": "repo", "label": "Read and create issues in repositories", "is_sensitive": True},
         ]
     },
     {
@@ -85,6 +84,16 @@ DEFAULT_APP_CONNECTIONS = [
         "status": "coming_soon",
         "permissions": [
             {"key": "request", "label": "Execute configured API calls", "is_sensitive": True},
+        ]
+    },
+    {
+        "app_id": "local_filesystem",
+        "name": "Local Files",
+        "auth_type": "local",
+        "status": "connected",
+        "permissions": [
+            {"key": "read", "label": "Read files in workspace", "is_sensitive": False},
+            {"key": "write", "label": "Write files in workspace", "is_sensitive": True},
         ]
     }
 ]

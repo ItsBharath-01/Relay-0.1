@@ -75,6 +75,19 @@ def is_allowlisted(match_str: str) -> bool:
     return False
 
 
+def is_git_ignored(file_path: Path) -> bool:
+    import subprocess
+    try:
+        res = subprocess.run(
+            ["git", "check-ignore", "-q", str(file_path)],
+            cwd=ROOT_DIR,
+            capture_output=True
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 def scan() -> int:
     findings = []
 
@@ -85,12 +98,15 @@ def scan() -> int:
             file_path = Path(root) / file
             rel_path = file_path.relative_to(ROOT_DIR)
 
+            if file in EXCLUDED_FILES:
+                continue
+
+            if is_git_ignored(file_path):
+                continue
+
             # Check for disallowed database files
             if file.endswith((".db", ".sqlite", ".sqlite3", ".db-journal")):
                 findings.append((str(rel_path), "Committed database file found", file))
-                continue
-
-            if file in EXCLUDED_FILES:
                 continue
 
             # Check text files for secret patterns

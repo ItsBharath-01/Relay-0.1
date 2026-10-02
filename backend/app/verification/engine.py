@@ -18,7 +18,9 @@ class VerificationEngine:
         credentials: Optional[Dict[str, Any]] = None,
         tool_id: Optional[str] = None
     ) -> VerificationResult:
-        if hasattr(result, "to_dict"):
+        if hasattr(result, "model_dump"):
+            result_dict = result.model_dump()
+        elif hasattr(result, "to_dict"):
             result_dict = result.to_dict()
         elif isinstance(result, dict):
             result_dict = result
@@ -34,6 +36,9 @@ class VerificationEngine:
                 details="Action failed to produce a structured result."
             )
         result = result_dict
+        # Flatten nested 'data' payload for direct attribute access if present
+        payload_data = result.get("data") if isinstance(result.get("data"), dict) else result
+
 
         # 1. Web Search Verification
         if capability_id == "web_search" or action == "web_search":

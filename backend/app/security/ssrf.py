@@ -253,3 +253,127 @@ class SafeHTTPClient:
                 continue
 
             return response
+
+
+def validate_mcp_url(url: str) -> Tuple[str, str, int]:
+    """
+    SSRF validation for MCP server URLs.
+
+    Extends the standard validate_and_resolve_url() with a narrowly scoped
+    development-only allowlist for local MCP endpoints.
+
+    The allowlist is controlled exclusively by:
+        RELAY_DEV_ALLOW_LOCAL_MCP=true
+        RELAY_DEV_LOCAL_MCP_HOSTS=127.0.0.1,localhost
+
+    Rules:
+    - Production environments (ENVIRONMENT=production): allowlist is IGNORED,
+      full SSRF policy applies unconditionally.
+    - Non-production with RELAY_DEV_ALLOW_LOCAL_MCP=false: full SSRF policy.
+    - Non-production with RELAY_DEV_ALLOW_LOCAL_MCP=true:
+        * Cloud metadata IPs (169.254.169.254, fd00:ec2::254) → BLOCKED always.
+        * Link-local (169.254.x.x / fe80::/10) → BLOCKED always.
+        * DNS rebinding (mixed public+private resolution) → BLOCKED always.
+        * Redirects are still limited to 3 hops.
+        * Only hostnames explicitly listed in RELAY_DEV_LOCAL_MCP_HOSTS are allowed.
+        * All other private/loopback IPs → BLOCKED.
+
+    This function is called ONLY from the MCP registration and health-check
+    paths. It must NOT be used for REST, web reader, or browser adapters.
+    """
+    env = getattr(settings, "ENVIRONMENT", "production").lower()
+    dev_allowed = getattr(settings, "RELAY_DEV_ALLOW_LOCAL_MCP", False)
+
+    # In production the allowlist is always disabled regardless of the env var
+    if env == "production":
+        dev_allowed = False
+
+    if not dev_allowed:
+        # Standard strict SSRF — identical to all other tools
+        return validate_and_resolve_url(url)
+
+    # Parse URL to extract the hostname for allowlist check
+    if not url or not isinstance(url, str):
+        raise SSRFError("Missing or empty MCP URL.")
+    parsed = urlparse(url.strip())
+    hostname = (parsed.hostname or "").lower()
+    scheme = (parsed.scheme or "").lower()
+
+    if scheme and scheme not in ("http", "https"):
+        raise SSRFError(f"Prohibited URL scheme '{scheme}'. Only http and https are allowed.")
+
+    if not hostname:
+        raise SSRFError("MCP URL is missing hostname.")
+
+    # Always block cloud metadata — no exceptions
+    if hostname in CLOUD_METADATA_IPS:
+        raise SSRFError(f"Access to cloud metadata IP '{hostname}' is blocked even in dev mode.")
+
+    # Resolve to IP to check for cloud metadata via numeric IP
+    try:
+        ip_obj = ipaddress.ip_address(hostname)
+        ip_str = str(ip_obj)
+        # Cloud metadata and link-local are always blocked
+        if ip_str in CLOUD_METADATA_IPS or ip_obj.is_link_local:
+            raise SSRFError(f"Access to '{hostname}' is blocked even in dev mode.")
+        if ip_obj.is_multicast or ip_obj.is_unspecified:
+            raise SSRFError(f"Multicast/unspecified address '{hostname}' is blocked.")
+        is_raw_ip = True
+    except ValueError:
+        ip_str = None
+        is_raw_ip = False
+
+    # Build the explicit allowlist from config
+    raw_allowed = getattr(settings, "RELAY_DEV_LOCAL_MCP_HOSTS", "127.0.0.1,localhost")
+    allowed_hosts = {h.strip().lower() for h in raw_allowed.split(",") if h.strip()}
+
+    # Check if the hostname (or its raw IP form) is in the allowlist
+    in_allowlist = hostname in allowed_hosts or (ip_str is not None and ip_str in allowed_hosts)
+
+    if not in_allowlist:
+        # Not on the allowlist → apply full strict SSRF policy
+        return validate_and_resolve_url(url)
+
+    # The hostname is explicitly allowlisted — still validate it is actually
+    # a loopback/private and not something that resolved to a public IP via DNS rebinding.
+    if is_raw_ip:
+        ip_obj2 = ipaddress.ip_address(ip_str)
+        if not (ip_obj2.is_loopback or ip_obj2.is_private):
+            raise SSRFError(
+                f"Allowlisted host '{hostname}' resolved to a non-loopback/non-private IP '{ip_str}'. "
+                "This looks like DNS rebinding — blocked."
+            )
+        return ip_str, hostname, parsed.port or (443 if scheme == "https" else 80)
+    else:
+        # DNS resolution — check for rebinding: all resolved IPs must be loopback/private
+        port = parsed.port or (443 if scheme == "https" else 80)
+        try:
+            addrinfo = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+        except socket.gaierror as e:
+            raise SSRFError(f"DNS resolution failed for allowlisted host '{hostname}': {e}")
+
+        resolved_ips = []
+        for entry in addrinfo:
+            ip_str_r = entry[4][0]
+            if ip_str_r in CLOUD_METADATA_IPS:
+                raise SSRFError(
+                    f"Allowlisted hostname '{hostname}' resolved to cloud metadata IP '{ip_str_r}'. "
+                    "Blocked to prevent DNS rebinding."
+                )
+            try:
+                resolved_ip = ipaddress.ip_address(ip_str_r)
+            except ValueError:
+                raise SSRFError(f"Resolved unexpected address format '{ip_str_r}'.")
+            if resolved_ip.is_link_local:
+                raise SSRFError(
+                    f"Allowlisted hostname '{hostname}' resolved to link-local IP '{ip_str_r}'. Blocked."
+                )
+            if not (resolved_ip.is_loopback or resolved_ip.is_private):
+                raise SSRFError(
+                    f"Allowlisted hostname '{hostname}' resolved to public IP '{ip_str_r}'. "
+                    "This looks like DNS rebinding — blocked."
+                )
+            resolved_ips.append(ip_str_r)
+
+        return resolved_ips[0], hostname, port
+

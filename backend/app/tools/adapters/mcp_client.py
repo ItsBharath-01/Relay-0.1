@@ -150,9 +150,9 @@ def validate_mcp_config(config: Dict[str, Any]) -> None:
         url = config.get("server_url")
         if not url:
             raise ValueError("Parameter 'server_url' is required for HTTP/SSE MCP transport.")
-        from app.security.ssrf import validate_and_resolve_url, SSRFError
+        from app.security.ssrf import validate_mcp_url, SSRFError
         try:
-            validate_and_resolve_url(url)
+            validate_mcp_url(url)
         except SSRFError as se:
             raise ValueError(f"SSRF violation: {se}")
 

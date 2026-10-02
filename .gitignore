@@ -19,10 +19,13 @@ env/
 # Environment files
 .env
 .env.*
+*.env
 !.env.example
 .dev-secrets.json
 backend/.dev-secrets.json
 backend/.env
+frontend/.env
+frontend/.env.*
 
 # Databases & runtime state
 *.db

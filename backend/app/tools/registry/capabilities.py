@@ -100,6 +100,13 @@ CAPABILITY_REGISTRY: Dict[str, Capability] = {
         default_risk="low",
         description="Read and parse user-uploaded files or context documents."
     ),
+    "file_write": Capability(
+        id="file_write",
+        label="Write Workspace File",
+        category="connector",
+        default_risk="medium",
+        description="Create or overwrite files within the configured local workspace sandbox."
+    ),
     "api_request": Capability(
         id="api_request",
         label="REST API Request",

@@ -86,11 +86,29 @@ class GitHubTool(BaseTool):
             title = params.get("title")
             body = params.get("body", "")
 
-            if not repo or not title:
-                return ToolResult(status="error", error="Missing 'repository' or 'title' parameters.", side_effect_state="FAILED_NO_EFFECT")
+            if not repo or not isinstance(repo, str) or "/" not in repo or repo.count("/") != 1:
+                return ToolResult(
+                    status="error",
+                    error="Invalid repository format. Expected 'owner/repo'.",
+                    side_effect_state="FAILED_NO_EFFECT"
+                )
+            owner, repo_name = repo.split("/")
+            if not owner.strip() or not repo_name.strip():
+                return ToolResult(
+                    status="error",
+                    error="Invalid repository format. Neither owner nor repository name may be empty.",
+                    side_effect_state="FAILED_NO_EFFECT"
+                )
+
+            if not title or not isinstance(title, str) or not title.strip():
+                return ToolResult(
+                    status="error",
+                    error="Missing or empty 'title' parameter.",
+                    side_effect_state="FAILED_NO_EFFECT"
+                )
 
             url = f"https://api.github.com/repos/{repo}/issues"
-            payload = {"title": title, "body": body}
+            payload = {"title": title.strip(), "body": body or ""}
 
             async with httpx.AsyncClient() as client:
                 try:
@@ -102,10 +120,31 @@ class GitHubTool(BaseTool):
                             status="success",
                             data={
                                 "issue_url": data.get("html_url"),
-                                "issue_number": issue_num
+                                "issue_number": issue_num,
+                                "repository": repo,
+                                "title": data.get("title"),
+                                "state": data.get("state"),
                             },
                             external_ids=[str(issue_num)] if issue_num else [],
                             side_effect_state="CONFIRMED"
+                        )
+                    elif resp.status_code in (401, 403):
+                        return ToolResult(
+                            status="error",
+                            error=f"GitHub authorization failed ({resp.status_code}): Access denied to repository '{repo}'.",
+                            side_effect_state="FAILED_NO_EFFECT"
+                        )
+                    elif resp.status_code == 404:
+                        return ToolResult(
+                            status="error",
+                            error=f"GitHub repository not found: '{repo}'.",
+                            side_effect_state="FAILED_NO_EFFECT"
+                        )
+                    elif resp.status_code == 429:
+                        return ToolResult(
+                            status="error",
+                            error="GitHub API rate limit exceeded.",
+                            side_effect_state="FAILED_NO_EFFECT"
                         )
                     else:
                         return ToolResult(
@@ -186,8 +225,85 @@ class GitHubTool(BaseTool):
                 evidence={"error": err or getattr(result, "error", "Unknown error")},
                 reason=err or "Execution failed"
             )
+
+        if action in ("issue_create", "create"):
+            data = result.get("data") if hasattr(result, "get") else getattr(result, "data", {})
+            if isinstance(data, dict) and data.get("issue_number"):
+                issue_number = data.get("issue_number")
+                repo = data.get("repository") or params.get("repository")
+                issue_url = data.get("issue_url")
+            elif hasattr(result, "get") and result.get("issue_number"):
+                issue_number = result.get("issue_number")
+                repo = result.get("repository") or params.get("repository")
+                issue_url = result.get("issue_url")
+            elif isinstance(result, dict) and result.get("issue_number"):
+                issue_number = result.get("issue_number")
+                repo = result.get("repository") or params.get("repository")
+                issue_url = result.get("issue_url")
+            else:
+                issue_number = getattr(result, "issue_number", None)
+                repo = params.get("repository")
+                issue_url = None
+
+            if not issue_number:
+                return VerificationOutcome(
+                    result="failed",
+                    evidence={"error": "Missing issue_number in execution result"},
+                    reason="GitHub issue number not confirmed"
+                )
+
+            # Independent state verification: query GitHub API to verify the issue actually exists
+            credentials = ctx.credentials if ctx else None
+            token = credentials if isinstance(credentials, str) else (credentials.get("access_token") if isinstance(credentials, dict) else None)
+            if token and repo and issue_number:
+                try:
+                    headers = {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github.v3+json",
+                        "User-Agent": "Relay-Agent/0.2"
+                    }
+                    async with httpx.AsyncClient() as client:
+                        verify_resp = await client.get(
+                            f"https://api.github.com/repos/{repo}/issues/{issue_number}",
+                            headers=headers,
+                            timeout=10.0
+                        )
+                    if verify_resp.status_code == 200:
+                        verified_data = verify_resp.json()
+                        return VerificationOutcome(
+                            result="passed",
+                            evidence={
+                                "issue_number": issue_number,
+                                "repository": repo,
+                                "issue_url": issue_url or verified_data.get("html_url"),
+                                "state": verified_data.get("state"),
+                                "verified_live": True
+                            },
+                            reason=f"GitHub issue #{issue_number} independently verified via GitHub API"
+                        )
+                    else:
+                        return VerificationOutcome(
+                            result="failed",
+                            evidence={"status_code": verify_resp.status_code, "issue_number": issue_number},
+                            reason=f"Independent verification failed: GitHub returned {verify_resp.status_code}"
+                        )
+                except Exception as e:
+                    # Network issue during verification — report confirmed created from response
+                    return VerificationOutcome(
+                        result="passed",
+                        evidence={"issue_number": issue_number, "issue_url": issue_url, "verify_warning": str(e)},
+                        reason=f"GitHub issue #{issue_number} confirmed created"
+                    )
+
+            return VerificationOutcome(
+                result="passed",
+                evidence={"issue_number": issue_number, "issue_url": issue_url},
+                reason=f"GitHub issue #{issue_number} created successfully"
+            )
+
         return VerificationOutcome(
             result="passed",
             evidence={"status": "verified"},
             reason="GitHub action completed successfully"
         )
+

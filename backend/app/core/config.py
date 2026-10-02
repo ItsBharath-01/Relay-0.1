@@ -126,6 +126,26 @@ class Settings(BaseSettings):
         description="Dev/test escape hatch to permit loopback/RFC1918 addresses in REST/MCP/Web tools"
     )
 
+    # MCP-only local development allowlist (P1-1 narrow exception)
+    # These settings ONLY affect MCP connection registration and health checks.
+    # They have NO effect on REST adapter, web reader, browser, or any other tool.
+    # In production, set RELAY_DEV_ALLOW_LOCAL_MCP=false (the default).
+    RELAY_DEV_ALLOW_LOCAL_MCP: bool = Field(
+        default=False,
+        description=(
+            "Development only: permit explicitly allowlisted local MCP endpoints "
+            "(e.g. 127.0.0.1:8085/mcp). Has NO effect on REST, web reader, or browser tools. "
+            "Must remain False in production."
+        )
+    )
+    RELAY_DEV_LOCAL_MCP_HOSTS: str = Field(
+        default="127.0.0.1,localhost",
+        description=(
+            "Comma-separated hostnames/IPs allowed when RELAY_DEV_ALLOW_LOCAL_MCP=true. "
+            "Only exact matches are permitted — no wildcards, no subnets."
+        )
+    )
+
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [
         "http://localhost:5173",
