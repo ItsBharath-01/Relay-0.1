@@ -23,7 +23,7 @@ class VerificationEngine:
         elif hasattr(result, "to_dict"):
             result_dict = result.to_dict()
         elif isinstance(result, dict):
-            result_dict = result
+            result_dict = dict(result)
         else:
             result_dict = None
 
@@ -35,9 +35,15 @@ class VerificationEngine:
                 evidence={"error": "Tool returned no result or invalid format"},
                 details="Action failed to produce a structured result."
             )
-        result = result_dict
-        # Flatten nested 'data' payload for direct attribute access if present
-        payload_data = result.get("data") if isinstance(result.get("data"), dict) else result
+
+        # Merge nested 'data' payload for direct attribute access if present
+        flat_result = dict(result_dict)
+        if isinstance(result_dict.get("data"), dict):
+            for k, v in result_dict["data"].items():
+                if k not in flat_result or flat_result[k] is None:
+                    flat_result[k] = v
+        result = flat_result
+
 
 
         # 1. Web Search Verification

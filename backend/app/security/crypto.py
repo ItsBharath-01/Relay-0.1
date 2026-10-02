@@ -103,15 +103,15 @@ SENSITIVE_PATTERNS = [
     (re.compile(r"ya29\.[A-Za-z0-9_\-\.]+"), "[REDACTED_GOOGLE_TOKEN]"),
     # GitHub Personal Access Token (classic & fine-grained)
     (re.compile(r"github_pat_[A-Za-z0-9_]+"), "[REDACTED_GITHUB_PAT]"),
-    (re.compile(r"ghp_[A-Za-z0-9]{36,40}"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"gho_[A-Za-z0-9]{36,40}"), "[REDACTED_GITHUB_OAUTH]"),
-    (re.compile(r"ghu_[A-Za-z0-9]{36,40}"), "[REDACTED_GITHUB_USER]"),
-    (re.compile(r"ghs_[A-Za-z0-9]{36,40}"), "[REDACTED_GITHUB_SERVER]"),
-    (re.compile(r"ghr_[A-Za-z0-9]{36,40}"), "[REDACTED_GITHUB_REFRESH]"),
+    (re.compile(r"ghp_[A-Za-z0-9_]{10,}"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"gho_[A-Za-z0-9_]{10,}"), "[REDACTED_GITHUB_OAUTH]"),
+    (re.compile(r"ghu_[A-Za-z0-9_]{10,}"), "[REDACTED_GITHUB_USER]"),
+    (re.compile(r"ghs_[A-Za-z0-9_]{10,}"), "[REDACTED_GITHUB_SERVER]"),
+    (re.compile(r"ghr_[A-Za-z0-9_]{10,}"), "[REDACTED_GITHUB_REFRESH]"),
     # Slack tokens (bot, user, app)
     (re.compile(r"xox[baprs]-[A-Za-z0-9_\-]+"), "[REDACTED_SLACK_TOKEN]"),
     # Google API Key
-    (re.compile(r"AIza[0-9A-Za-z_\-]{20,}"), "[REDACTED_GOOGLE_API_KEY]"),
+    (re.compile(r"AIza[0-9A-Za-z_\-]{10,}"), "[REDACTED_GOOGLE_API_KEY]"),
     # OpenAI / generic sk- keys
     (re.compile(r"sk-(?:[A-Za-z0-9_\-]{8,})"), "[REDACTED_API_KEY]"),
     # Bearer tokens in headers or logs

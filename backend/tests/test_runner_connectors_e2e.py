@@ -332,7 +332,7 @@ async def test_runner_gmail_connector_e2e():
         db.add_all([user, pref, conn, perm_read, perm_draft, perm_send, goal, plan, task, execution])
         await db.commit()
 
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    with patch("app.tools.adapters.gmail.httpx.AsyncClient", return_value=mock_client):
         await execution_runner.run_execution(execution.id)
 
     async with async_session_maker() as db:
@@ -412,7 +412,7 @@ async def test_runner_google_calendar_connector_e2e():
         db.add_all([user, conn, perm_read, perm_create, goal, plan, task, execution])
         await db.commit()
 
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    with patch("app.tools.adapters.google_calendar.httpx.AsyncClient", return_value=mock_client):
         await execution_runner.run_execution(execution.id)
 
     async with async_session_maker() as db:

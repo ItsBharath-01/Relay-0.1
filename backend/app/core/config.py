@@ -3,16 +3,18 @@ import logging
 import os
 import secrets
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Any
 from cryptography.fernet import Fernet
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, field_validator
 
 logger = logging.getLogger(__name__)
 
 KNOWN_PLACEHOLDERS = {
     "relay_secret_key_development_only_replace_in_prod_a982f1b4908c",
     "change_this_to_a_secure_random_jwt_secret_in_production_32b",
+    "replace_with_generated_hex32_jwt_secret_key_in_production",
+    "replace_with_generated_fernet_base64_encryption_key_here=",
     "dev_insecure_jwt_secret_key_change_in_production_12345",
     "change_this_secret",
     "replace_in_production",
@@ -146,7 +148,11 @@ class Settings(BaseSettings):
         )
     )
 
-    # CORS
+    # Frontend & CORS
+    FRONTEND_URL: Optional[str] = Field(
+        default=None,
+        description="Public URL of the frontend (e.g. https://relay-app.vercel.app)"
+    )
     BACKEND_CORS_ORIGINS: List[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
@@ -155,6 +161,24 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://localhost:8000"
     ]
+
+    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: Any) -> List[str]:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
+            return [i.strip() for i in v.split(",") if i.strip()]
+        elif isinstance(v, (list, tuple)):
+            return [str(i).strip() for i in v if str(i).strip()]
+        return v
+
 
 
 def _validate_and_initialize_settings() -> Settings:
@@ -206,7 +230,14 @@ def _validate_and_initialize_settings() -> Settings:
         if "ALLOW_PRIVATE_NETWORKS" not in os.environ:
             s.ALLOW_PRIVATE_NETWORKS = True
 
+    # Ensure FRONTEND_URL is included in CORS origins if specified
+    if s.FRONTEND_URL and s.FRONTEND_URL.strip():
+        f_url = s.FRONTEND_URL.strip().rstrip("/")
+        if f_url and f_url not in s.BACKEND_CORS_ORIGINS:
+            s.BACKEND_CORS_ORIGINS.append(f_url)
+
     return s
+
 
 
 settings = _validate_and_initialize_settings()
