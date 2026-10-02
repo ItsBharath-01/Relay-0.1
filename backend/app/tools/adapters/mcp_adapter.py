@@ -41,7 +41,8 @@ ACTION_PATTERNS = [
     (re.compile(r"^(?:search|find|query|list|filter)[_-]?(.*)$", re.I), "search", "low"),
     (re.compile(r"^(?:get|read|fetch|view|inspect)[_-]?(.*)$", re.I), "read", "low"),
     (re.compile(r"^(?:update|edit|modify|patch|append)[_-]?(.*)$", re.I), "update", "medium"),
-    (re.compile(r"^(?:delete|remove|drop|cancel|clear|destroy)[_-]?(.*)$", re.I), "delete", "high"),
+    (re.compile(r"^(?:delete|remove|drop|cancel|clear|destroy|wipe|purge)[_-]?(.*)$", re.I), "delete", "high"),
+    (re.compile(r"^(?:.*_)?(?:delete|wipe|destroy|purge|drop)(.*)$", re.I), "delete", "high"),
 ]
 
 
@@ -75,10 +76,20 @@ def map_tool_to_capability(tool_name: str, description: str = "") -> Tuple[str, 
         match = pattern.match(clean_name)
         if match:
             raw_entity = match.group(1).strip()
+            # If matched prefix adjective (e.g. dangerous_wipe -> prefix is empty, or clean_name has adjective)
+            for adj in ["dangerous_", "unsafe_", "batch_"]:
+                clean_no_adj = clean_name.replace(adj, "")
+                if clean_no_adj.endswith(action_verb):
+                    raw_entity = clean_no_adj[: -len(action_verb)].strip("_-")
+                elif clean_no_adj.startswith(action_verb):
+                    raw_entity = clean_no_adj[len(action_verb):].strip("_-")
+
             # If entity has plural s, normalize (e.g. notes -> note)
             if raw_entity.endswith("s") and len(raw_entity) > 3 and not raw_entity.endswith("ss"):
                 raw_entity = raw_entity[:-1]
             if not raw_entity:
+                raw_entity = clean_name.replace("dangerous_", "").replace("unsafe_", "").replace("_" + action_verb, "")
+            if not raw_entity or raw_entity == action_verb:
                 raw_entity = "item"
 
             cap_id = f"{raw_entity}_{action_verb}"
@@ -86,24 +97,31 @@ def map_tool_to_capability(tool_name: str, description: str = "") -> Tuple[str, 
             return cap_id, cap_label, "mcp", default_risk
 
     # 3. Check entity_action format directly (e.g. note_create, note_search)
-    reverse_verbs = ["create", "search", "read", "update", "delete"]
+    reverse_verbs = ["create", "search", "read", "update", "delete", "wipe"]
     for v in reverse_verbs:
         if clean_name.endswith(f"_{v}") or clean_name.endswith(f"-{v}"):
             raw_entity = clean_name[: -(len(v) + 1)]
-            risk = "high" if v == "delete" else ("medium" if v in ("create", "update") else "low")
-            return f"{raw_entity}_{v}", f"{v.title()} {raw_entity.replace('_', ' ').title()}", "mcp", risk
+            mapped_v = "delete" if v in ("delete", "wipe") else v
+            risk = "high" if mapped_v == "delete" else ("medium" if mapped_v in ("create", "update") else "low")
+            return f"{raw_entity}_{mapped_v}", f"{mapped_v.title()} {raw_entity.replace('_', ' ').title()}", "mcp", risk
 
-    # 4. Description-based inference if available
+    # 4. Description-based inference if available (e.g. "delete all stored notes" -> "notes_delete")
     desc_lower = description.lower()
     for verb, risk in [
         ("delete", "high"),
+        ("wipe", "high"),
+        ("destroy", "high"),
         ("create", "medium"),
         ("update", "medium"),
         ("search", "low"),
         ("read", "low"),
     ]:
         if f"{verb} " in desc_lower or f"{verb}s " in desc_lower:
-            return f"{clean_name}_{verb}", f"{verb.title()} {clean_name}", "mcp", risk
+            # Try to extract entity word after verb if available
+            words = desc_lower.split()
+            entity = clean_name.replace("dangerous_", "").replace("unsafe_", "")
+            action_v = "delete" if verb in ("delete", "wipe", "destroy") else verb
+            return f"{entity}_{action_v}", f"{action_v.title()} {entity.replace('_', ' ').title()}", "mcp", risk
 
     # 5. Fallback unclassified
     return f"mcp_unclassified_{clean_name}", f"MCP Tool {tool_name}", "mcp", "medium"
@@ -125,6 +143,7 @@ class DynamicMCPTool(BaseTool):
         capability_id: str,
         risk_profile: str = "medium",
         required_permissions: Optional[List[str]] = None,
+        provides: Optional[List[str]] = None,
     ):
         self.connection_id = connection_id
         self.server_name = server_name
@@ -133,7 +152,15 @@ class DynamicMCPTool(BaseTool):
         self.name = f"{server_name}: {tool_name}"
         self.description = description
         self.input_schema = input_schema or {}
-        self.provides = [capability_id]
+        
+        # Build provided capabilities
+        prov_set = set(provides or [capability_id])
+        prov_set.add(capability_id)
+        if capability_id.endswith("_search"):
+            prov_set.add(capability_id.replace("_search", "_read"))
+        elif capability_id.endswith("_read"):
+            prov_set.add(capability_id.replace("_read", "_search"))
+        self.provides = list(prov_set)
         self.capability_id = capability_id
         self.tool_type = "mcp"
         self.risk_profile = risk_profile
@@ -216,7 +243,25 @@ class DynamicMCPTool(BaseTool):
             return has_id, evidence
 
         elif "search" in self.capability_id or "read" in self.capability_id:
-            has_results = bool(data or raw_text)
+            parsed_res = None
+            if isinstance(data, (dict, list)):
+                parsed_res = data
+            elif raw_text:
+                try:
+                    parsed_res = json.loads(raw_text)
+                except Exception:
+                    pass
+
+            if isinstance(parsed_res, dict):
+                has_results = bool(
+                    parsed_res.get("found", True)
+                    and (parsed_res.get("count", 1) > 0 or len(parsed_res.get("results", [1])) > 0)
+                )
+            elif isinstance(parsed_res, list):
+                has_results = len(parsed_res) > 0
+            else:
+                has_results = bool(data or raw_text)
+
             evidence = {
                 "tool_name": self.tool_name,
                 "capability": self.capability_id,
@@ -582,6 +627,28 @@ async def discover_and_register_mcp_tools(
                 description=desc or f"Execute {name} on {server_name}."
             )
             register_capability(new_cap)
+
+        # Also register read/search alias if applicable
+        if cap_id.endswith("_search"):
+            alias_cap_id = cap_id.replace("_search", "_read")
+            if not get_capability(alias_cap_id):
+                register_capability(Capability(
+                    id=alias_cap_id,
+                    label=cap_label.replace("Search", "Read"),
+                    category=cap_cat,
+                    default_risk=default_risk,
+                    description=f"Read/query {cap_id.replace('_search', '')} on {server_name}."
+                ))
+        elif cap_id.endswith("_read"):
+            alias_cap_id = cap_id.replace("_read", "_search")
+            if not get_capability(alias_cap_id):
+                register_capability(Capability(
+                    id=alias_cap_id,
+                    label=cap_label.replace("Read", "Search"),
+                    category=cap_cat,
+                    default_risk=default_risk,
+                    description=f"Search {cap_id.replace('_read', '')} on {server_name}."
+                ))
 
         # Create DynamicMCPTool instance
         tool_instance = DynamicMCPTool(

@@ -42,7 +42,6 @@ class ToolSelectionEngine:
         excluded_tool_ids: Optional[List[str]] = None,
     ) -> SelectionDecisionRecord:
         excluded = set(excluded_tool_ids or [])
-        candidate_tools = get_tools_for_capability(capability_id)
 
         # Query user connections with permissions
         stmt = select(Connection).options(selectinload(Connection.permissions)).where(Connection.user_id == user_id)
@@ -50,6 +49,58 @@ class ToolSelectionEngine:
         all_user_conns = res.scalars().all()
         user_conns: Dict[str, Connection] = {c.app_id: c for c in all_user_conns}
         user_conns_by_id: Dict[str, Connection] = {c.id: c for c in all_user_conns}
+
+        # Dynamically register tools from user's MCP servers if not already registered in memory
+        for c in all_user_conns:
+            if c.app_id == "mcp" and c.discovered_tools:
+                for item in c.discovered_tools:
+                    tid = item.get("tool_id") or f"mcp:{c.id}:{item.get('name')}"
+                    if not get_tool(tid):
+                        from app.tools.adapters.mcp_adapter import DynamicMCPTool
+                        from app.tools.registry import register_tool
+                        from app.tools.registry.capabilities import get_capability, register_capability, Capability
+                        cap_id = item.get("capability_id") or "mcp_call"
+                        if not get_capability(cap_id):
+                            register_capability(Capability(
+                                id=cap_id,
+                                label=item.get("capability_label", cap_id),
+                                category="mcp",
+                                default_risk=item.get("risk_profile", "medium"),
+                                description=item.get("description", f"MCP Tool for {cap_id}")
+                            ))
+                        if cap_id.endswith("_search"):
+                            alias_cap_id = cap_id.replace("_search", "_read")
+                            if not get_capability(alias_cap_id):
+                                register_capability(Capability(
+                                    id=alias_cap_id,
+                                    label=item.get("capability_label", cap_id).replace("Search", "Read"),
+                                    category="mcp",
+                                    default_risk=item.get("risk_profile", "medium"),
+                                    description=f"Read {cap_id.replace('_search', '')} via MCP."
+                                ))
+                        elif cap_id.endswith("_read"):
+                            alias_cap_id = cap_id.replace("_read", "_search")
+                            if not get_capability(alias_cap_id):
+                                register_capability(Capability(
+                                    id=alias_cap_id,
+                                    label=item.get("capability_label", cap_id).replace("Read", "Search"),
+                                    category="mcp",
+                                    default_risk=item.get("risk_profile", "medium"),
+                                    description=f"Search {cap_id.replace('_read', '')} via MCP."
+                                ))
+                        t_inst = DynamicMCPTool(
+                            connection_id=c.id,
+                            server_name=c.name,
+                            tool_name=item.get("name"),
+                            description=item.get("description", ""),
+                            input_schema=item.get("input_schema", {}),
+                            capability_id=cap_id,
+                            risk_profile=item.get("risk_profile", "medium"),
+                            required_permissions=["call_tools"],
+                        )
+                        register_tool(t_inst)
+
+        candidate_tools = get_tools_for_capability(capability_id)
 
         checks: List[ToolCheckResult] = []
         eligible_tools: List[Tuple[BaseTool, str]] = []
@@ -93,6 +144,10 @@ class ToolSelectionEngine:
             if tool.requires_connection and conn:
                 granted_keys = {p.permission_key for p in conn.permissions if p.is_granted}
                 for req_perm in tool.required_permissions:
+                    if req_perm == "call_tools" and ("call_tools" in granted_keys or "execute" in granted_keys):
+                        continue
+                    if req_perm == "list_tools" and ("list_tools" in granted_keys or "discover" in granted_keys):
+                        continue
                     if req_perm not in granted_keys:
                         is_authorized = False
                         break

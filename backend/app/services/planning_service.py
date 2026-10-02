@@ -6,7 +6,7 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from app.llm import get_llm_provider
-from app.models.entities import Goal, Plan, Task, User, UserPreference
+from app.models.entities import Goal, Plan, Task, User, UserPreference, Connection
 from app.schemas.plan import PlanSchema, PlanTaskSchema, PlanUpdateRequest
 from app.agent.prompts.planning import build_planning_prompt, PLANNING_PROMPT_VERSION
 from app.selection.engine import selection_engine
@@ -54,6 +54,44 @@ class PlanningService:
         participants = understanding.get("participants", [])
         deadline = understanding.get("deadline")
         required_caps = understanding.get("required_capabilities", [])
+        # Ensure user's connected MCP capabilities are loaded and registered
+        c_stmt = select(Connection).where(Connection.user_id == user_id, Connection.status == "connected")
+        c_res = await db.execute(c_stmt)
+        user_conns = c_res.scalars().all()
+        for conn in user_conns:
+            if conn.app_id == "mcp" and conn.discovered_tools:
+                for item in conn.discovered_tools:
+                    cap_id = item.get("capability_id")
+                    if cap_id:
+                        from app.tools.registry.capabilities import get_capability, register_capability, Capability
+                        if not get_capability(cap_id):
+                            register_capability(Capability(
+                                id=cap_id,
+                                label=item.get("capability_label", cap_id),
+                                category="mcp",
+                                default_risk=item.get("risk_profile", "medium"),
+                                description=item.get("description", f"MCP Tool for {cap_id}")
+                            ))
+                        if cap_id.endswith("_search"):
+                            alias_cap_id = cap_id.replace("_search", "_read")
+                            if not get_capability(alias_cap_id):
+                                register_capability(Capability(
+                                    id=alias_cap_id,
+                                    label=item.get("capability_label", cap_id).replace("Search", "Read"),
+                                    category="mcp",
+                                    default_risk=item.get("risk_profile", "medium"),
+                                    description=f"Read {cap_id.replace('_search', '')} via MCP."
+                                ))
+                        elif cap_id.endswith("_read"):
+                            alias_cap_id = cap_id.replace("_read", "_search")
+                            if not get_capability(alias_cap_id):
+                                register_capability(Capability(
+                                    id=alias_cap_id,
+                                    label=item.get("capability_label", cap_id).replace("Read", "Search"),
+                                    category="mcp",
+                                    default_risk=item.get("risk_profile", "medium"),
+                                    description=f"Search {cap_id.replace('_read', '')} via MCP."
+                                ))
 
         # Build prompt
         sys_prompt, user_prompt = build_planning_prompt(
@@ -180,8 +218,11 @@ class PlanningService:
 
         missing_caps = []
         task_schemas = []
+        from app.tools.registry import get_tool
         for t in plan.tasks:
             has_tool = bool(t.selected_tool_id)
+            tool_obj = get_tool(t.selected_tool_id) if t.selected_tool_id else None
+            tool_name = tool_obj.name if tool_obj else t.selected_tool_id
             if not has_tool:
                 missing_caps.append(t.capability_id)
             task_schemas.append(PlanTaskSchema(
@@ -196,7 +237,7 @@ class PlanningService:
                 status=t.status,
                 has_connected_tool=has_tool,
                 selected_tool_id=t.selected_tool_id,
-                selected_tool_name=t.selected_tool_id,
+                selected_tool_name=tool_name,
             ))
 
         return PlanSchema(

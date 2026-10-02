@@ -278,7 +278,23 @@ class OllamaProvider(LLMProvider):
             except (LLMInvalidJSONError, LLMSchemaValidationError) as parse_val_err:
                 last_error = parse_val_err
                 if attempt < retries:
-                    err_msg = f"Your previous JSON was rejected: {str(parse_val_err)}. Return ONLY valid JSON adhering to the specified schema without surrounding markdown."
+                    err_details = ""
+                    if isinstance(parse_val_err, LLMSchemaValidationError):
+                        # Format specific validation error messages for the LLM
+                        err_lines = []
+                        for err in parse_val_err.details.get("validation_errors", []):
+                            loc = " -> ".join(str(l) for l in err.get("loc", []))
+                            msg = err.get("msg", "")
+                            err_lines.append(f"- Field '{loc}': {msg}")
+                        err_details = "\nValidation errors:\n" + "\n".join(err_lines)
+                    elif isinstance(parse_val_err, LLMInvalidJSONError):
+                        err_details = f"\nJSON syntax error: {parse_val_err.message}"
+
+                    err_msg = (
+                        f"Your previous JSON response was rejected because:{err_details}\n"
+                        f"Please correct these errors and return ONLY a valid JSON object matching the requested schema. "
+                        f"Do NOT include any explanatory text, markdown quotes, or thoughts outside the JSON."
+                    )
                     messages.append({"role": "assistant", "content": full_content})
                     messages.append({"role": "user", "content": err_msg})
                     await asyncio.sleep(0.5 * attempt)

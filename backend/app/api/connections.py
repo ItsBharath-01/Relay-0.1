@@ -52,6 +52,8 @@ async def list_connections(
             "status": c.status,
             "auth_type": c.auth_type,
             "has_credentials": bool(c.encrypted_credentials),
+            "discovered_tools": c.discovered_tools or [],
+            "scopes": c.scopes or [],
             "permissions": [
                 {
                     "id": p.id,
@@ -86,6 +88,8 @@ async def get_connection_detail(
         "name": conn.name,
         "status": conn.status,
         "auth_type": conn.auth_type,
+        "discovered_tools": conn.discovered_tools or [],
+        "scopes": conn.scopes or [],
         "permissions": [
             {
                 "id": p.id,
@@ -152,6 +156,39 @@ async def connect_app(
     cred_json = json.dumps({"access_token": token_val, "url": req.url})
     conn.encrypted_credentials = encrypt_secret(cred_json)
     conn.status = "connected"
+
+    # If this is an MCP connection, ensure permissions and trigger discovery
+    if conn.app_id == "mcp":
+        # Load permissions
+        p_res = await db.execute(select(Permission).where(Permission.connection_id == conn.id))
+        existing_perms = {p.permission_key: p for p in p_res.scalars().all()}
+        for perm_key, perm_label, is_sensitive in [
+            ("call_tools", "Call MCP Tools", True),
+            ("list_tools", "List Available Tools", False),
+            ("discover", "Discover MCP tools", False),
+            ("execute", "Execute tools on external servers", True),
+        ]:
+            if perm_key in existing_perms:
+                existing_perms[perm_key].is_granted = True
+            else:
+                p = Permission(
+                    connection_id=conn.id,
+                    permission_key=perm_key,
+                    label=perm_label,
+                    is_granted=True,
+                    is_sensitive=is_sensitive,
+                )
+                db.add(p)
+
+        try:
+            from app.tools.adapters.mcp_client import parse_mcp_config
+            norm_config = parse_mcp_config({"access_token": token_val, "url": req.url})
+            discovered = await discover_and_register_mcp_tools(conn.id, conn.name, norm_config)
+            conn.discovered_tools = discovered
+            conn.scopes = [t["capability_id"] for t in discovered]
+        except Exception as exc:
+            logger.warning(f"Tool discovery on connect_app failed: {exc}")
+
     await db.commit()
 
     return {"status": "connected", "connection_id": conn.id}
@@ -423,6 +460,11 @@ async def register_mcp_server(
         existing.encrypted_credentials = enc_creds
         existing.status = "connected"
         conn = existing
+        # For existing connection, ensure permissions are granted if present
+        if conn.permissions:
+            for p in conn.permissions:
+                if p.permission_key in ["call_tools", "list_tools", "execute", "discover"]:
+                    p.is_granted = True
     else:
         conn = Connection(
             user_id=current_user.id,
@@ -436,7 +478,7 @@ async def register_mcp_server(
         await db.flush()
 
         for perm_key, perm_label, is_sensitive in [
-            ("call_tools", "Call MCP Tools", False),
+            ("call_tools", "Call MCP Tools", True),
             ("list_tools", "List Available Tools", False),
         ]:
             perm = Permission(

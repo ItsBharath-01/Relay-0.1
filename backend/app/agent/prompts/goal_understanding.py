@@ -18,13 +18,14 @@ Analyze the user's natural language goal and respond with ONLY a valid JSON obje
   "clarification_questions": []
 }}
 
-ALLOWED CAPABILITY IDS (strictly select only from this list):
+ALLOWED CAPABILITY IDS (strictly select the most relevant capability IDs from this list):
 {capability_list}
 
 RULES:
-1. Only set clarification_needed = true if CRITICAL information is truly missing that prevents execution.
-2. User-facing text must be in language: '{language}'. Capability IDs must stay in English.
-3. Do NOT produce any <think> reasoning thoughts. Output ONLY the valid JSON object directly starting with {{ and ending with }}.
+1. Always map the user's requested operations to the most specific matching capabilities available in the allowed capability list (e.g. use note creation/manipulation capabilities if available for notes, email capabilities for emails, etc.). Do not substitute web_search or browser navigation for actions that specifically require music playback, audio playing, or application actions unless explicitly requested by the user to search the web. If a user asks to play music or interact with a media player and no media capability exists, require 'media_play'.
+2. Only set clarification_needed = true if CRITICAL information is truly missing that prevents execution.
+3. User-facing text must be in language: '{language}'. Capability IDs must stay in English.
+4. Do NOT produce any <think> reasoning thoughts. Output ONLY the valid JSON object directly starting with {{ and ending with }}.
 """.strip()
 
 def build_goal_understanding_prompt(
@@ -39,7 +40,7 @@ def build_goal_understanding_prompt(
     Returns: (system_prompt, user_prompt)
     """
     caps = get_all_capabilities()
-    cap_lines = ", ".join([f"'{c.id}'" for c in caps])
+    cap_lines = "\n".join([f"- '{c.id}': {c.description}" for c in caps])
 
     system_prompt = SYSTEM_INSTRUCTIONS.format(
         version=PROMPT_VERSION,

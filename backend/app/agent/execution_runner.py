@@ -327,9 +327,23 @@ class ExecutionRunner:
                     if prior_parts:
                         action_params["text"] = "\n\n".join(prior_parts)
 
-                # Always ensure a fallback query param for web_search if planner omitted it
-                if action_name == "web_search" and not action_params.get("query"):
-                    action_params["query"] = goal.text
+                # Always ensure a fallback query param for search/read tools if planner omitted it
+                if ("search" in task.capability_id or "read" in task.capability_id or "search" in action_name or "search" in selected_tool.id) and not action_params.get("query"):
+                    for candidate_key in ["title", "name", "keyword", "term", "filter", "text"]:
+                        if action_params.get(candidate_key):
+                            action_params["query"] = str(action_params[candidate_key])
+                            break
+                    else:
+                        if action_name == "web_search" or "search" in task.capability_id:
+                            action_params["query"] = goal.text
+
+                # Clean structured query prefixes (like 'title:XYZ' -> 'XYZ') if search capability is generic keyword search
+                if ("search" in task.capability_id or "search" in action_name or "search" in selected_tool.id) and isinstance(action_params.get("query"), str):
+                    q_val = action_params["query"].strip()
+                    for pfx in ["title:", "content:", "name:"]:
+                        if q_val.lower().startswith(pfx):
+                            action_params["query"] = q_val[len(pfx):].strip()
+                            break
 
                 # 4. Risk Classifier & Approval Gate
                 risk_assessment = risk_classifier.assess_action(
@@ -413,7 +427,23 @@ class ExecutionRunner:
                         )
                         return
 
-                    # Approval granted
+                    # Approval granted: verify payload integrity before execution
+                    if hash_payload(approval.content) != approval.payload_hash:
+                        task.status = "failed"
+                        execution.status = "failed"
+                        execution.completed_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        await event_broadcaster.emit(
+                            db, execution_id, "task_failed",
+                            "Execution blocked: approval payload hash integrity mismatch.",
+                            task_id=task.id
+                        )
+                        return
+
+                    # Bind action_params strictly to the verified approved content
+                    if isinstance(approval.content, dict):
+                        action_params = dict(approval.content)
+
                     execution.status = "running"
                     task.status = "running"
                     await db.commit()

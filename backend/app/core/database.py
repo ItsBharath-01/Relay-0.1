@@ -61,4 +61,30 @@ async def init_db():
             if "discovered_tools" not in conn_cols:
                 connection.execute(text("ALTER TABLE connections ADD COLUMN discovered_tools JSON"))
 
+            # Seed call_tools and list_tools for mcp connections if missing
+            mcp_rows = connection.execute(text("SELECT id FROM connections WHERE app_id = 'mcp'")).fetchall()
+            for row in mcp_rows:
+                cid = row[0]
+                existing_perms = {
+                    p[0] for p in connection.execute(
+                        text("SELECT permission_key FROM permissions WHERE connection_id = :cid"),
+                        {"cid": cid}
+                    ).fetchall()
+                }
+                import uuid
+                for p_key, p_label, is_sens in [
+                    ("call_tools", "Call MCP Tools", 1),
+                    ("list_tools", "List Available Tools", 0),
+                    ("execute", "Execute tools on external servers", 1),
+                    ("discover", "Discover MCP tools", 0),
+                ]:
+                    if p_key not in existing_perms:
+                        connection.execute(
+                            text(
+                                "INSERT INTO permissions (id, connection_id, permission_key, label, is_granted, is_sensitive) "
+                                "VALUES (:id, :cid, :key, :lbl, 1, :sens)"
+                            ),
+                            {"id": str(uuid.uuid4()), "cid": cid, "key": p_key, "lbl": p_label, "sens": is_sens}
+                        )
+
         await conn.run_sync(migrate_schema)

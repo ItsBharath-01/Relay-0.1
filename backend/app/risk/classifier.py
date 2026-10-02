@@ -30,8 +30,8 @@ class RiskClassifier:
         # Rule 1: Deletion or destructive wiping of data / calendar / emails / resources
         if any(w in capability_id.lower() or w in action.lower() for w in ["delete", "remove", "wipe", "drop", "destroy", "purge", "terminate"]):
             req_app = True if prefs.ask_deleting is None else bool(prefs.ask_deleting)
-            target = params.get("event_id") or params.get("id") or params.get("note_id") or ("all stored data" if "wipe" in action.lower() else "specified resource")
-            level = "critical" if any(w in action.lower() for w in ["wipe", "destroy", "purge", "drop"]) else "high"
+            target = params.get("event_id") or params.get("id") or params.get("note_id") or ("all stored data" if any(w in action.lower() or w in capability_id.lower() for w in ["wipe", "purge"]) else "specified resource")
+            level = "critical" if any(w in action.lower() or w in capability_id.lower() for w in ["wipe", "destroy", "purge", "drop"]) else "high"
             return RiskAssessment(
                 risk_level=level,
                 requires_approval=True if level == "critical" else req_app,

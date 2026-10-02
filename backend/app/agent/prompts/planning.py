@@ -45,7 +45,8 @@ RULES:
 2. Link dependencies correctly in 'depends_on'. If task 2 needs output from task 1, add task 1's ID.
 3. Titles must be in language: '{language}'. Capability IDs and actions stay in English.
 4. Keep the plan minimal, direct, and executable (typically 2 to 5 tasks).
-5. Do NOT produce any <think> reasoning thoughts. Output ONLY the valid JSON object directly starting with {{ and ending with }}.
+5. HONEST CAPABILITY MATCHING: Never substitute 'web_search' or 'web_read' as a substitute for real application operations (e.g., playing audio/video, creating documents, booking, sending payments, controlling native apps). If the action requires playing media or controlling an app, and no dedicated capability exists in ALLOWED CAPABILITY IDS, declare the true capability needed (e.g. 'media_play') rather than faking it with web_search.
+6. Do NOT produce any <think> reasoning thoughts. Output ONLY the valid JSON object directly starting with {{ and ending with }}.
 """.strip()
 
 def build_planning_prompt(

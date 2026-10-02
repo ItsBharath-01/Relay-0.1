@@ -72,6 +72,8 @@ DEFAULT_APP_CONNECTIONS = [
         "auth_type": "url",
         "status": "coming_soon",
         "permissions": [
+            {"key": "call_tools", "label": "Call MCP Tools", "is_sensitive": True},
+            {"key": "list_tools", "label": "List Available Tools", "is_sensitive": False},
             {"key": "discover", "label": "Discover MCP tools", "is_sensitive": False},
             {"key": "execute", "label": "Execute tools on external servers", "is_sensitive": True},
         ]
