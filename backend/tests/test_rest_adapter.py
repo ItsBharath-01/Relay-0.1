@@ -1,7 +1,7 @@
-import app.tools.registry
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from app.tools.adapters.rest import RestApiTool
+from app.tools.registry.base import ExecutionContext
 
 pytestmark = pytest.mark.asyncio
 
@@ -23,14 +23,14 @@ async def test_rest_api_get_success():
     tool = RestApiTool()
     mock_client = make_http_mock(200, '{"result": "ok"}', {"Content-Type": "application/json"})
 
-    # Mock SSRF check to allow, and mock httpx
     with patch.object(tool, "_is_safe_url", return_value=True):
         with patch("httpx.AsyncClient", return_value=mock_client):
             res = await tool.execute(
                 "api_request",
                 {"url": "https://api.example.com/data", "method": "GET"},
+                ctx=ExecutionContext(),
             )
-    assert "error" not in res, str(res)
+    assert not res.error, str(res.error)
     assert res["status_code"] == 200
     assert res["content"] == '{"result": "ok"}'
     assert res["truncated"] is False
@@ -38,30 +38,42 @@ async def test_rest_api_get_success():
 
 async def test_rest_api_ssrf_localhost_blocked():
     tool = RestApiTool()
-    # Don't mock - let real SSRF check run for localhost
-    res = await tool.execute("api_request", {"url": "http://localhost:8080/secret"})
-    assert "error" in res
-    assert "SSRF" in res["error"]
+    with patch("app.core.config.settings.ALLOW_PRIVATE_NETWORKS", False):
+        res = await tool.execute(
+            "api_request",
+            {"url": "http://localhost:8080/secret"},
+            ctx=ExecutionContext(),
+        )
+    assert res.status == "error"
+    assert "SSRF" in res.error
 
 
 async def test_rest_api_ssrf_metadata_blocked():
     tool = RestApiTool()
-    res = await tool.execute("api_request", {"url": "http://169.254.169.254/metadata"})
-    assert "error" in res
-    assert "SSRF" in res["error"]
+    res = await tool.execute(
+        "api_request",
+        {"url": "http://169.254.169.254/metadata"},
+        ctx=ExecutionContext(),
+    )
+    assert res.status == "error"
+    assert "SSRF" in res.error
 
 
 async def test_rest_api_missing_url():
     tool = RestApiTool()
-    res = await tool.execute("api_request", {})
-    assert "error" in res
-    assert "url" in res["error"].lower()
+    res = await tool.execute("api_request", {}, ctx=ExecutionContext())
+    assert res.status == "error"
+    assert "url" in res.error.lower()
 
 
 async def test_rest_api_invalid_method():
     tool = RestApiTool()
-    res = await tool.execute("api_request", {"url": "https://api.example.com", "method": "TRACE"})
-    assert "error" in res
+    res = await tool.execute(
+        "api_request",
+        {"url": "https://api.example.com", "method": "TRACE"},
+        ctx=ExecutionContext(),
+    )
+    assert res.status == "error"
 
 
 async def test_rest_api_content_truncation():
@@ -74,6 +86,7 @@ async def test_rest_api_content_truncation():
             res = await tool.execute(
                 "api_request",
                 {"url": "https://api.example.com/large", "method": "GET"},
+                ctx=ExecutionContext(),
             )
     assert res.get("truncated") is True
     assert len(res["content"]) <= 8100
@@ -82,8 +95,9 @@ async def test_rest_api_content_truncation():
 def test_ssrf_check_blocks_private_ips():
     """Unit test the SSRF validator directly."""
     tool = RestApiTool()
-    assert tool._is_safe_url("http://localhost/foo") is False
-    assert tool._is_safe_url("http://127.0.0.1/foo") is False
-    assert tool._is_safe_url("http://169.254.169.254/metadata") is False
-    assert tool._is_safe_url("ftp://example.com/data") is False
-    assert tool._is_safe_url("not-a-url") is False
+    with patch("app.core.config.settings.ALLOW_PRIVATE_NETWORKS", False):
+        assert tool._is_safe_url("http://localhost/foo") is False
+        assert tool._is_safe_url("http://127.0.0.1/foo") is False
+        assert tool._is_safe_url("http://169.254.169.254/metadata") is False
+        assert tool._is_safe_url("ftp://example.com/data") is False
+        assert tool._is_safe_url("not-a-url") is False

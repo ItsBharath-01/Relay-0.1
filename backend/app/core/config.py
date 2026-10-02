@@ -1,7 +1,59 @@
+import json
+import logging
 import os
+import secrets
+from pathlib import Path
 from typing import Optional, List
+from cryptography.fernet import Fernet
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+
+logger = logging.getLogger(__name__)
+
+KNOWN_PLACEHOLDERS = {
+    "relay_secret_key_development_only_replace_in_prod_a982f1b4908c",
+    "change_this_to_a_secure_random_jwt_secret_in_production_32b",
+    "dev_insecure_jwt_secret_key_change_in_production_12345",
+    "change_this_secret",
+    "replace_in_production",
+    "secret",
+    "password",
+    "default",
+    "W03_3n9D3vE10pm3ntK3yF0rR31ay02App11cat1onS3cur1ty=",
+    "_JHCRHGuTE5O9qv1DQ8raHDpsy9iHW7xX5_QK5idYUA=",
+}
+
+
+def _get_dev_secrets_file() -> Path:
+    # Anchor dev secrets to backend/.dev-secrets.json
+    base_dir = Path(__file__).resolve().parent.parent.parent
+    return base_dir / ".dev-secrets.json"
+
+
+def _load_or_create_dev_secrets() -> dict:
+    fpath = _get_dev_secrets_file()
+    if fpath.exists():
+        try:
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+            if "SECRET_KEY" in data and "ENCRYPTION_KEY" in data:
+                return data
+        except Exception:
+            pass
+
+    # Generate random ephemeral secrets for dev
+    sec = secrets.token_hex(32)
+    enc = Fernet.generate_key().decode("utf-8")
+    data = {"SECRET_KEY": sec, "ENCRYPTION_KEY": enc}
+    try:
+        fpath.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        logger.warning(
+            f"LOUD WARNING: Generating ephemeral dev secrets in {fpath}. "
+            "Never use in production."
+        )
+    except Exception as e:
+        logger.warning(f"Could not persist dev secrets: {e}")
+    return data
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -10,10 +62,17 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    # Environment mode
+    ENVIRONMENT: str = Field(
+        default="production",
+        description="development | test | production"
+    )
+
     # App
     PROJECT_NAME: str = "Relay"
     API_V1_STR: str = "/api/v1"
     DEBUG: bool = False
+    EXECUTION_TIMEOUT_SECONDS: int = 1800  # P0-3: 30 minutes max wall-clock execution
 
     # Database
     DATABASE_URL: str = Field(
@@ -22,15 +81,15 @@ class Settings(BaseSettings):
     )
 
     # Auth & Security
-    SECRET_KEY: str = Field(
-        default="relay_secret_key_development_only_replace_in_prod_a982f1b4908c",
+    SECRET_KEY: Optional[str] = Field(
+        default=None,
         description="JWT signing key"
     )
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440 # 24 hours
-    ENCRYPTION_KEY: str = Field(
-        default="_JHCRHGuTE5O9qv1DQ8raHDpsy9iHW7xX5_QK5idYUA=",
-        description="Fernet key for encrypting credentials at rest"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60  # P1-5: 60 minutes
+    ENCRYPTION_KEY: Optional[str] = Field(
+        default=None,
+        description="Comma-separated Fernet key(s) for credential encryption at rest"
     )
 
     # LLM Settings (Ollama-first, local by default)
@@ -57,6 +116,16 @@ class Settings(BaseSettings):
     GITHUB_CLIENT_ID: Optional[str] = None
     GITHUB_CLIENT_SECRET: Optional[str] = None
 
+    # Trusted MCP Stdio Configurations (P0-2)
+    # JSON list of trusted server dicts: [{"id": "...", "path": "...", "args": [...], "allowed_env": [...]}]
+    RELAY_TRUSTED_MCP_SERVERS: str = "[]"
+
+    # Network / SSRF Settings (P1-1)
+    ALLOW_PRIVATE_NETWORKS: bool = Field(
+        default=False,
+        description="Dev/test escape hatch to permit loopback/RFC1918 addresses in REST/MCP/Web tools"
+    )
+
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [
         "http://localhost:5173",
@@ -67,4 +136,57 @@ class Settings(BaseSettings):
         "http://localhost:8000"
     ]
 
-settings = Settings()
+
+def _validate_and_initialize_settings() -> Settings:
+    s = Settings()
+    env = s.ENVIRONMENT.lower()
+
+    if env == "production":
+        # Validate SECRET_KEY
+        if not s.SECRET_KEY or len(s.SECRET_KEY.encode("utf-8")) < 32 or s.SECRET_KEY in KNOWN_PLACEHOLDERS:
+            raise RuntimeError(
+                "PRODUCTION STARTUP FAILURE: SECRET_KEY must be provided, at least 32 bytes, "
+                "and not a known placeholder. Generate one using: python scripts/generate_secrets.py"
+            )
+
+        # Validate ENCRYPTION_KEY
+        if not s.ENCRYPTION_KEY or s.ENCRYPTION_KEY in KNOWN_PLACEHOLDERS:
+            raise RuntimeError(
+                "PRODUCTION STARTUP FAILURE: ENCRYPTION_KEY must be provided and not a known placeholder. "
+                "Generate one using: python scripts/generate_secrets.py"
+            )
+
+        # Validate Fernet keys (supports comma-separated list for rotation)
+        keys = [k.strip() for k in s.ENCRYPTION_KEY.split(",") if k.strip()]
+        if not keys:
+            raise RuntimeError("PRODUCTION STARTUP FAILURE: ENCRYPTION_KEY contains no valid keys.")
+        for k in keys:
+            try:
+                Fernet(k.encode("utf-8"))
+            except Exception as e:
+                raise RuntimeError(
+                    f"PRODUCTION STARTUP FAILURE: Invalid Fernet key '{k[:6]}...': {e}"
+                )
+
+    elif env == "development":
+        dev_secrets = None
+        if not s.SECRET_KEY or s.SECRET_KEY in KNOWN_PLACEHOLDERS:
+            dev_secrets = _load_or_create_dev_secrets()
+            s.SECRET_KEY = dev_secrets["SECRET_KEY"]
+        if not s.ENCRYPTION_KEY or s.ENCRYPTION_KEY in KNOWN_PLACEHOLDERS:
+            if not dev_secrets:
+                dev_secrets = _load_or_create_dev_secrets()
+            s.ENCRYPTION_KEY = dev_secrets["ENCRYPTION_KEY"]
+
+    elif env == "test":
+        if not s.SECRET_KEY:
+            s.SECRET_KEY = secrets.token_hex(32)
+        if not s.ENCRYPTION_KEY:
+            s.ENCRYPTION_KEY = Fernet.generate_key().decode("utf-8")
+        if "ALLOW_PRIVATE_NETWORKS" not in os.environ:
+            s.ALLOW_PRIVATE_NETWORKS = True
+
+    return s
+
+
+settings = _validate_and_initialize_settings()

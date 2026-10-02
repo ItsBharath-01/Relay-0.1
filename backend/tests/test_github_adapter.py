@@ -1,7 +1,7 @@
-import app.tools.registry
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from app.tools.adapters.github import GitHubTool
+from app.tools.registry.base import ExecutionContext
 
 pytestmark = pytest.mark.asyncio
 
@@ -29,10 +29,10 @@ async def test_github_issue_create_success():
         res = await tool.execute(
             "issue_create",
             {"repository": "owner/repo", "title": "Test Issue", "body": "test"},
-            credentials={"access_token": "fake_token"},
+            ctx=ExecutionContext(credentials={"access_token": "fake_token"}),
         )
-    assert "error" not in res, str(res)
-    assert res["status"] == "success"
+    assert not res.error, str(res.error)
+    assert res.status == "success"
     assert res["issue_url"] == "https://github.com/a/b/issues/1"
     assert res["issue_number"] == 1
     # Verify token was passed
@@ -43,9 +43,13 @@ async def test_github_issue_create_success():
 
 async def test_github_issue_create_missing_params():
     tool = GitHubTool()
-    res = await tool.execute("issue_create", {"title": "No Repo"}, credentials="token")
-    assert "error" in res
-    assert "repository" in res["error"].lower() or "title" in res["error"].lower()
+    res = await tool.execute(
+        "issue_create",
+        {"title": "No Repo"},
+        ctx=ExecutionContext(credentials="token")
+    )
+    assert res.status == "error"
+    assert "repository" in res.error.lower() or "title" in res.error.lower()
 
 
 async def test_github_issue_read_success():
@@ -56,17 +60,22 @@ async def test_github_issue_read_success():
         res = await tool.execute(
             "issue_read",
             {"repository": "owner/repo", "issue_number": 1},
-            credentials={"access_token": "fake_token"},
+            ctx=ExecutionContext(credentials={"access_token": "fake_token"}),
         )
-    assert "error" not in res, str(res)
+    assert not res.error, str(res.error)
+    assert res.status == "success"
     assert res["title"] == "Test Issue"
     assert res["state"] == "open"
 
 
 async def test_github_missing_credentials():
     tool = GitHubTool()
-    res = await tool.execute("issue_create", {"repository": "a/b", "title": "x"}, credentials=None)
-    assert "error" in res
+    res = await tool.execute(
+        "issue_create",
+        {"repository": "a/b", "title": "x"},
+        ctx=ExecutionContext(credentials=None)
+    )
+    assert res.status == "error"
 
 
 async def test_github_api_error():
@@ -78,7 +87,7 @@ async def test_github_api_error():
         res = await tool.execute(
             "issue_create",
             {"repository": "owner/repo", "title": "Bad Issue"},
-            credentials="fake_token",
+            ctx=ExecutionContext(credentials="fake_token"),
         )
-    assert "error" in res
-    assert "422" in res["error"]
+    assert res.status == "error"
+    assert "422" in res.error

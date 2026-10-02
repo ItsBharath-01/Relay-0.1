@@ -276,6 +276,8 @@ async def cancel_execution(
     execution = res.scalar_one_or_none()
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found.")
+    if execution.status in ["completed", "failed", "cancelled", "stopped"]:
+        raise HTTPException(status_code=400, detail=f"Execution is already in terminal state '{execution.status}'.")
     execution.status = "cancelled"
     execution.completed_at = datetime.now(timezone.utc)
     await db.commit()

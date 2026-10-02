@@ -47,7 +47,7 @@ async def test_register_mcp_server_update_existing(mock_health):
     mock_result.scalar_one_or_none.return_value = existing_conn
     mock_db.execute.return_value = mock_result
     
-    req = MCPServerRegisterRequest(name="Updated MCP", url="http://new-url:8080/mcp")
+    req = MCPServerRegisterRequest(name="Updated MCP", url="http://127.0.0.1:8080/mcp")
     
     res = await register_mcp_server(req, current_user=mock_user, db=mock_db)
     

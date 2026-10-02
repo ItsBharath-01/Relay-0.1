@@ -40,6 +40,7 @@ from app.selection.engine import ToolSelectionEngine
 from app.risk.classifier import risk_classifier
 from app.verification.engine import verification_engine
 from app.security.crypto import encrypt_secret, hash_payload
+from app.tools.registry.base import ExecutionContext
 
 pytestmark = pytest.mark.asyncio
 
@@ -48,6 +49,7 @@ STDIO_CONFIG = {
     "transport": "stdio",
     "command": sys.executable,
     "args": [SERVER_SCRIPT],
+    "is_trusted_operator": True,
 }
 
 
@@ -108,7 +110,7 @@ async def test_live_e2e_note_creation():
     exec_result = await tool.execute(
         action="create_note",
         params=params,
-        credentials=STDIO_CONFIG,
+        ctx=ExecutionContext(credentials=STDIO_CONFIG),
     )
     assert exec_result["is_error"] is False
     assert "Hackathon" in exec_result["raw_text"]
@@ -191,7 +193,7 @@ async def test_generalization_search_notes():
     exec_result = await tool.execute(
         action="search_notes",
         params=search_params,
-        credentials=STDIO_CONFIG,
+        ctx=ExecutionContext(credentials=STDIO_CONFIG),
     )
     assert exec_result["is_error"] is False
 
@@ -264,7 +266,7 @@ async def test_generalization_delete_note_high_risk():
     exec_result = await tool.execute(
         action="delete_note",
         params=del_params,
-        credentials=STDIO_CONFIG,
+        ctx=ExecutionContext(credentials=STDIO_CONFIG),
     )
     assert exec_result["is_error"] is False
 

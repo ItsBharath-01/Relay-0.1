@@ -41,6 +41,8 @@ except ImportError:
     StreamableHTTPTransport = None
     streamable_http_client = None
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 MAX_CONTENT_CHARS = 8000
@@ -135,6 +137,9 @@ def parse_mcp_config(credentials: Any) -> Dict[str, Any]:
         "env": env,
         "headers": headers,
         "timeout": float(data.get("timeout", MCP_TIMEOUT_SECONDS)),
+        "is_trusted_operator": bool(data.get("is_trusted_operator", False)),
+        "user_id": data.get("user_id"),
+        "connection_id": data.get("connection_id"),
     }
 
 
@@ -145,14 +150,11 @@ def validate_mcp_config(config: Dict[str, Any]) -> None:
         url = config.get("server_url")
         if not url:
             raise ValueError("Parameter 'server_url' is required for HTTP/SSE MCP transport.")
-        parsed = urlparse(url)
-        if parsed.scheme not in ["http", "https"]:
-            raise ValueError(f"Invalid URL scheme '{parsed.scheme}'. Only http and https are permitted.")
-        
-        # SSRF Protection: Block cloud metadata service IP (169.254.169.254)
-        hostname = (parsed.hostname or "").lower()
-        if hostname == "169.254.169.254" or hostname.endswith(".internal"):
-            raise ValueError(f"SSRF violation: Host '{hostname}' is forbidden.")
+        from app.security.ssrf import validate_and_resolve_url, SSRFError
+        try:
+            validate_and_resolve_url(url)
+        except SSRFError as se:
+            raise ValueError(f"SSRF violation: {se}")
 
     elif transport == "stdio":
         cmd = config.get("command")
@@ -163,6 +165,14 @@ def validate_mcp_config(config: Dict[str, Any]) -> None:
         for arg in config.get("args", []):
             if DANGEROUS_CMD_CHARS.search(arg):
                 raise ValueError(f"Command injection risk: prohibited characters in arg '{arg}'.")
+
+        # P0-2: Stdio is strictly forbidden from end-user self-registration
+        # Only operator-configured trusted servers are permitted.
+        if not config.get("is_trusted_operator", False):
+            raise ValueError(
+                "Stdio transport is restricted to operator-configured servers (RELAY_TRUSTED_MCP_SERVERS). "
+                "End users cannot register arbitrary stdio commands."
+            )
     else:
         raise ValueError(f"Unsupported MCP transport '{transport}'. Supported: streamable_http, sse, stdio.")
 
@@ -186,14 +196,23 @@ def _sanitize_arguments(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_session_key(config: Dict[str, Any]) -> str:
+    """
+    P0-2: Isolates session keys per tenant/user and connection.
+    Key structure: (user_id, connection_id, transport_target)
+    """
+    user_id = str(config.get("user_id") or "global")
+    connection_id = str(config.get("connection_id") or "default")
     transport = config.get("transport", "")
+
     if transport == "stdio":
         cmd = config.get("command", "")
         args = " ".join(config.get("args", []))
-        return f"stdio:{cmd}:{args}"
+        target = f"stdio:{cmd}:{args}"
     else:
         url = config.get("server_url", "")
-        return f"{transport}:{url.rstrip('/')}"
+        target = f"{transport}:{url.rstrip('/')}"
+
+    return f"{user_id}:{connection_id}:{target}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

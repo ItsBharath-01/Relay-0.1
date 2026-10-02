@@ -1,6 +1,7 @@
 from typing import Dict, Any, Optional, Tuple, List
 from app.schemas.verification import VerificationResult, GoalVerificationResult, GoalCriterionEvaluation
 from app.tools.registry import get_tool
+from app.tools.registry.base import ExecutionContext
 
 class VerificationEngine:
     """
@@ -17,7 +18,14 @@ class VerificationEngine:
         credentials: Optional[Dict[str, Any]] = None,
         tool_id: Optional[str] = None
     ) -> VerificationResult:
-        if not result or not isinstance(result, dict):
+        if hasattr(result, "to_dict"):
+            result_dict = result.to_dict()
+        elif isinstance(result, dict):
+            result_dict = result
+        else:
+            result_dict = None
+
+        if not result_dict or not isinstance(result_dict, dict):
             return VerificationResult(
                 criterion=f"Verify {action} returned valid output",
                 method="Output validation",
@@ -25,6 +33,7 @@ class VerificationEngine:
                 evidence={"error": "Tool returned no result or invalid format"},
                 details="Action failed to produce a structured result."
             )
+        result = result_dict
 
         # 1. Web Search Verification
         if capability_id == "web_search" or action == "web_search":
@@ -114,7 +123,10 @@ class VerificationEngine:
                     tool = get_tool(tool_id)
                     if tool:
                         try:
-                            passed, evidence = await tool.verify(action, params, result, credentials)
+                            ctx = ExecutionContext(credentials=credentials)
+                            v_out = await tool.verify(action, params, result, ctx)
+                            passed = (v_out.result == "passed") if hasattr(v_out, "result") else bool(v_out[0])
+                            evidence = v_out.evidence if hasattr(v_out, "evidence") else v_out[1]
                             return VerificationResult(
                                 criterion="Verify calendar event created in Google Calendar",
                                 method="Independent Google Calendar API read-back check",
@@ -207,7 +219,10 @@ class VerificationEngine:
             tool = get_tool(tool_id)
             if tool:
                 try:
-                    passed, evidence = await tool.verify(action, params, result, credentials)
+                    ctx = ExecutionContext(credentials=credentials)
+                    v_out = await tool.verify(action, params, result, ctx)
+                    passed = (v_out.result == "passed") if hasattr(v_out, "result") else bool(v_out[0])
+                    evidence = v_out.evidence if hasattr(v_out, "evidence") else v_out[1]
                     return VerificationResult(
                         criterion=f"Verify {action} execution",
                         method="Adapter verification check",

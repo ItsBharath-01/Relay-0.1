@@ -29,6 +29,7 @@ from app.selection.engine import ToolSelectionEngine
 from app.risk.classifier import risk_classifier
 from app.verification.engine import verification_engine
 from app.security.crypto import encrypt_secret, hash_payload
+from app.tools.registry.base import ExecutionContext
 
 pytestmark = pytest.mark.asyncio
 
@@ -37,6 +38,21 @@ LIVE_HTTP_CONFIG = {
     "transport": "streamable_http",
     "server_url": SERVER_URL,
 }
+import socket
+
+
+def _is_server_listening(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def check_live_server():
+    if not _is_server_listening("127.0.0.1", 8085):
+        pytest.skip("SKIPPED-ENV: Live MCP test server not running at http://127.0.0.1:8085/mcp")
 
 
 async def test_live_mcp_streamable_http_session_lifecycle():
@@ -100,7 +116,7 @@ async def test_live_mcp_streamable_http_session_lifecycle():
     note_title = f"Sprint Planning {uuid.uuid4().hex[:4]}"
     note_content = "Discuss Relay MCP streamable HTTP session preservation"
     params = {"title": note_title, "content": note_content}
-    create_res = await create_tool.execute("create_note", params, credentials=LIVE_HTTP_CONFIG)
+    create_res = await create_tool.execute("create_note", params, ctx=ExecutionContext(credentials=LIVE_HTTP_CONFIG))
 
     assert create_res["is_error"] is False
     assert create_res.get("session_id") == initial_session_id
@@ -119,7 +135,7 @@ async def test_live_mcp_streamable_http_session_lifecycle():
     )
     search_tool: DynamicMCPTool = get_tool(search_sel.selected_tool_id)  # type: ignore
     search_params = {"query": note_title}
-    search_res = await search_tool.execute("search_notes", search_params, credentials=LIVE_HTTP_CONFIG)
+    search_res = await search_tool.execute("search_notes", search_params, ctx=ExecutionContext(credentials=LIVE_HTTP_CONFIG))
 
     assert search_res["is_error"] is False
     assert search_res.get("session_id") == initial_session_id
@@ -174,7 +190,7 @@ async def test_live_mcp_streamable_http_session_lifecycle():
     assert approval.payload_hash == hash_payload(del_params)
 
     # Execute approved deletion
-    del_res = await delete_tool.execute("delete_note", del_params, credentials=LIVE_HTTP_CONFIG)
+    del_res = await delete_tool.execute("delete_note", del_params, ctx=ExecutionContext(credentials=LIVE_HTTP_CONFIG))
     assert del_res["is_error"] is False
     assert del_res.get("session_id") == initial_session_id
 

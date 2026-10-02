@@ -58,6 +58,7 @@ from app.tools.adapters.mcp_client import (
     MCPConnectionError,
     MCPTimeoutError,
 )
+from app.tools.registry.base import ExecutionContext
 from app.tools.adapters.mcp_adapter import (
     map_tool_to_capability,
     DynamicMCPTool,
@@ -84,6 +85,7 @@ STDIO_CONFIG = {
     "transport": "stdio",
     "command": sys.executable,
     "args": [SERVER_SCRIPT],
+    "is_trusted_operator": True,
 }
 
 
@@ -337,7 +339,7 @@ async def test_14_15_schema_validation():
 
     # Execution rejected before making call
     with pytest.raises(ValueError, match="Invalid arguments"):
-        await tool.execute("create_note", {"title": "Missing content"}, credentials=STDIO_CONFIG)
+        await tool.execute("create_note", {"title": "Missing content"}, ctx=ExecutionContext(credentials=STDIO_CONFIG))
 
 
 # ==============================================================================
@@ -364,7 +366,7 @@ async def test_17_execution_timeout_handling():
 
 
 async def test_18_execution_connection_error_handling():
-    bad_cfg = {"transport": "stdio", "command": "nonexistent_executable_12345", "args": []}
+    bad_cfg = {"transport": "stdio", "command": "nonexistent_executable_12345", "args": [], "is_trusted_operator": True}
     with pytest.raises(MCPConnectionError):
         await mcp_client.call_tool(bad_cfg, "any_tool", {})
 

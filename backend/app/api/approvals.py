@@ -68,6 +68,10 @@ async def decide_approval(
     if decision_norm not in ["approved", "rejected"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Decision must be 'approved' or 'rejected'.")
 
+    decided_by_norm = req.decided_by.strip().lower()
+    if decided_by_norm not in ["ui", "voice", "cli", "api"]:
+        decided_by_norm = "ui"
+
     # Verify cryptographic payload integrity
     stored_hash = approval.payload_hash
     computed_hash = hash_payload(approval.content)
@@ -84,7 +88,7 @@ async def decide_approval(
         )
 
     approval.status = decision_norm
-    approval.decided_by = req.decided_by
+    approval.decided_by = decided_by_norm
     approval.decided_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(approval)

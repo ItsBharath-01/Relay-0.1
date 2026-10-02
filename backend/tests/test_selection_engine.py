@@ -7,7 +7,7 @@ permissions, and capability for all P2-3 adapters.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from app.selection.engine import ToolSelectionEngine, SelectionDecisionRecord
-from app.models.entities import Connection
+from app.models.entities import Connection, Permission
 
 pytestmark = pytest.mark.asyncio
 
@@ -17,7 +17,16 @@ def make_connection(app_id: str, status: str = "connected") -> Connection:
     conn.app_id = app_id
     conn.status = status
     conn.encrypted_credentials = "valid_encrypted_val" if status == "connected" else None
-    conn.permissions = []
+    
+    perms = []
+    if status == "connected":
+        if app_id == "github":
+            perms.append(Permission(permission_key="repo", is_granted=True))
+        elif app_id == "slack":
+            perms.append(Permission(permission_key="chat:write", is_granted=True))
+        elif app_id == "mcp":
+            perms.append(Permission(permission_key="call_tools", is_granted=True))
+    conn.permissions = perms
     return conn
 
 

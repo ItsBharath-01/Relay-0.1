@@ -3,10 +3,18 @@ import json
 import urllib.parse
 import ipaddress
 import socket
-from typing import Dict, Any, List, Optional
-from app.tools.registry.base import BaseTool
+from typing import Dict, Any, List, Optional, Tuple, Union
+from app.tools.registry.base import (
+    BaseTool,
+    ActionSpec,
+    EffectClass,
+    ExecutionContext,
+    ToolResult,
+    VerificationOutcome,
+)
 
 MAX_CONTENT_CHARS = 8000
+
 
 class RestApiTool(BaseTool):
     tool_type: str = "api"
@@ -15,67 +23,73 @@ class RestApiTool(BaseTool):
     description: str = "Generic REST API Connector."
     provides: List[str] = ["api_request"]
     requires_connection: Optional[str] = "rest_connector"
+    required_permissions: List[str] = []
+
+    def describe_actions(self) -> List[ActionSpec]:
+        return [
+            ActionSpec(
+                action="api_request",
+                capability_id="api_request",
+                effect_class=EffectClass.NON_IDEMPOTENT_WRITE,
+                reversible=False,
+                target_param="url",
+                required_permission=None,
+                param_schema={
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "GET"},
+                        "url": {"type": "string", "description": "Target endpoint URL"},
+                        "headers": {"type": "object"},
+                        "payload": {"type": ["object", "string", "null"]}
+                    },
+                    "required": ["url"]
+                },
+                supports_idempotency_key=True
+            )
+        ]
 
     def _is_safe_url(self, url: str) -> bool:
         """Validate URL to prevent SSRF against internal/private endpoints."""
+        from app.security.ssrf import validate_and_resolve_url, SSRFError
         try:
-            parsed = urllib.parse.urlparse(url)
-            if parsed.scheme not in ["http", "https"]:
-                return False
-                
-            hostname = parsed.hostname
-            if not hostname:
-                return False
-                
-            # Block obviously bad hostnames
-            if hostname in ["localhost", "127.0.0.1", "::1"]:
-                return False
-                
-            # Block cloud metadata
-            if hostname == "169.254.169.254":
-                return False
-                
-            # Resolve DNS and block private IP ranges
-            try:
-                ip_info = socket.gethostbyname(hostname)
-                ip = ipaddress.ip_address(ip_info)
-                if ip.is_private or ip.is_loopback or ip.is_link_local:
-                    return False
-            except socket.gaierror:
-                return False
-                
+            validate_and_resolve_url(url)
             return True
+        except SSRFError:
+            return False
         except Exception:
             return False
 
-    async def execute(self, capability: str, params: Dict[str, Any], credentials: Any = None) -> Dict[str, Any]:
-        if capability == "api_request":
+    async def execute(
+        self,
+        action: str,
+        params: Dict[str, Any],
+        ctx: ExecutionContext
+    ) -> ToolResult:
+        if action in ["api_request", "request"]:
             method = str(params.get("method", "GET")).upper()
             url = params.get("url")
             payload = params.get("payload")
-            headers = params.get("headers", {})
+            headers = dict(params.get("headers", {}))
             
             if not url:
-                return {"error": "Missing 'url' parameter."}
+                return ToolResult(status="error", error="Missing 'url' parameter.", side_effect_state="FAILED_NO_EFFECT")
                 
             if method not in ["GET", "POST", "PUT", "PATCH", "DELETE"]:
-                return {"error": f"Unsupported HTTP method: {method}"}
+                return ToolResult(status="error", error=f"Unsupported HTTP method: {method}", side_effect_state="FAILED_NO_EFFECT")
                 
             if not self._is_safe_url(url):
-                return {"error": "URL blocked due to SSRF protection or invalid format."}
+                return ToolResult(status="error", error="URL blocked due to SSRF protection or invalid format.", side_effect_state="FAILED_NO_EFFECT")
 
-            # Optional credentials merging
+            credentials = ctx.credentials if ctx else None
             if credentials:
                 if isinstance(credentials, str):
                     headers["Authorization"] = f"Bearer {credentials}"
                 elif isinstance(credentials, dict):
-                    # Combine configured headers
                     config_headers = credentials.get("headers", {})
                     headers.update(config_headers)
                     if "access_token" in credentials and "Authorization" not in headers:
                         headers["Authorization"] = f"Bearer {credentials['access_token']}"
 
-            # Make the request
             async with httpx.AsyncClient(follow_redirects=True, max_redirects=3) as client:
                 try:
                     request_kwargs = {"timeout": 10.0}
@@ -93,39 +107,49 @@ class RestApiTool(BaseTool):
 
                     resp = await client.request(method, url, headers=headers, **request_kwargs)
                     
-                    # Read content safely
                     content = resp.text
                     truncated = False
                     if len(content) > MAX_CONTENT_CHARS:
                         content = content[:MAX_CONTENT_CHARS] + "\n... [TRUNCATED]"
                         truncated = True
                         
-                    return {
-                        "status_code": resp.status_code,
-                        "headers": dict(resp.headers),
-                        "content": content,
-                        "truncated": truncated
-                    }
+                    return ToolResult(
+                        status="success" if resp.status_code < 400 else "error",
+                        data={
+                            "status_code": resp.status_code,
+                            "headers": dict(resp.headers),
+                            "content": content,
+                            "truncated": truncated
+                        },
+                        error=None if resp.status_code < 400 else f"HTTP error {resp.status_code}",
+                        side_effect_state="CONFIRMED"
+                    )
                 except httpx.TooManyRedirects:
-                    return {"error": "Too many redirects."}
+                    return ToolResult(status="error", error="Too many redirects.", side_effect_state="UNCERTAIN")
                 except Exception as e:
-                    return {"error": f"Network error: {str(e)}"}
+                    return ToolResult(status="error", error=f"Network error: {str(e)}", side_effect_state="UNCERTAIN")
                     
-        return {"error": f"Unsupported capability '{capability}' for REST API."}
+        return ToolResult(status="error", error=f"Unsupported action '{action}' for REST API.", side_effect_state="FAILED_NO_EFFECT")
 
-    async def health_check(self, credentials: Any = None) -> tuple[bool, str]:
-        # A generic REST connector might just say true if configured properly.
-        # If there's a specific health endpoint configured, we could check it.
-        # But lacking that, assume true.
+    async def health_check(self, credentials: Any = None) -> Tuple[bool, Optional[str]]:
         return True, "REST Connector configured."
 
     async def verify(
         self,
         action: str,
-        params: dict,
-        result: dict,
-        credentials=None
-    ) -> tuple[bool, dict]:
-        if "error" in result:
-            return False, {"error": result["error"]}
-        return True, {"status": "verified"}
+        params: Dict[str, Any],
+        result: Union[ToolResult, Dict[str, Any]],
+        ctx: ExecutionContext
+    ) -> VerificationOutcome:
+        err = result.get("error") if hasattr(result, "get") else None
+        if err or (hasattr(result, "status") and result.status == "error"):
+            return VerificationOutcome(
+                result="failed",
+                evidence={"error": err or getattr(result, "error", "Unknown error")},
+                reason=err or "Execution failed"
+            )
+        return VerificationOutcome(
+            result="passed",
+            evidence={"status": "verified"},
+            reason="REST API call completed successfully"
+        )

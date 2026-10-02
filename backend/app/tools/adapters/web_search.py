@@ -1,9 +1,17 @@
 import re
 import urllib.parse
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 import httpx
 
-from app.tools.registry.base import BaseTool
+from app.tools.registry.base import (
+    BaseTool,
+    ActionSpec,
+    EffectClass,
+    ExecutionContext,
+    ToolResult,
+    VerificationOutcome,
+)
+
 
 class WebSearchTool(BaseTool):
     id = "web_search_engine"
@@ -12,6 +20,27 @@ class WebSearchTool(BaseTool):
     provides = ["web_search"]
     requires_connection = None
     required_permissions = []
+
+    def describe_actions(self) -> List[ActionSpec]:
+        return [
+            ActionSpec(
+                action="web_search",
+                capability_id="web_search",
+                effect_class=EffectClass.READ_ONLY,
+                reversible=False,
+                target_param="query",
+                required_permission=None,
+                param_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query terms"},
+                        "max_results": {"type": "integer", "description": "Maximum number of results to return", "default": 5}
+                    },
+                    "required": ["query"]
+                },
+                supports_idempotency_key=False
+            )
+        ]
 
     async def health_check(self, credentials: Optional[str] = None) -> Tuple[bool, Optional[str]]:
         try:
@@ -27,8 +56,8 @@ class WebSearchTool(BaseTool):
         self,
         action: str,
         params: Dict[str, Any],
-        credentials: Optional[str] = None
-    ) -> Dict[str, Any]:
+        ctx: ExecutionContext
+    ) -> ToolResult:
         query = params.get("query", "").strip()
         if not query:
             raise ValueError("Parameter 'query' is required for web search.")
@@ -50,22 +79,18 @@ class WebSearchTool(BaseTool):
             html = res.text
             results = []
 
-            # Extract search snippets and links from DuckDuckGo HTML
-            # Pattern matches <a class="result__snippet" ...> or <a class="result__url" ...>
             raw_results = re.findall(
                 r'<h2 class="result__title">[\s\S]*?<a class="result__url" href="([^"]+)">([\s\S]*?)</a>[\s\S]*?<a class="result__snippet[^"]*"[^>]*>([\s\S]*?)</a>',
                 html
             )
 
             for link, title, snippet in raw_results[:max_results]:
-                # Clean duckduckgo redirect link: //duckduckgo.com/l/?uddg=URL
                 clean_link = link
                 if "uddg=" in link:
                     parsed = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
                     if "uddg" in parsed:
                         clean_link = parsed["uddg"][0]
 
-                # Strip HTML tags
                 clean_title = re.sub(r"<[^>]+>", "", title).strip()
                 clean_snippet = re.sub(r"<[^>]+>", "", snippet).strip()
 
@@ -76,7 +101,6 @@ class WebSearchTool(BaseTool):
                         "snippet": clean_snippet
                     })
 
-            # Fallback regex if DuckDuckGo altered class names
             if not results:
                 links = re.findall(r'<a[^>]*class="result__snippet"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>', html)
                 for lk, snip in links[:max_results]:
@@ -86,24 +110,33 @@ class WebSearchTool(BaseTool):
                         "snippet": re.sub(r"<[^>]+>", "", snip).strip()
                     })
 
-            return {
+            data_out = {
                 "query": query,
                 "result_count": len(results),
                 "results": results
             }
+            return ToolResult(
+                status="success",
+                data=data_out,
+                side_effect_state="CONFIRMED"
+            )
 
     async def verify(
         self,
         action: str,
         params: Dict[str, Any],
-        result: Dict[str, Any],
-        credentials: Optional[str] = None
-    ) -> Tuple[bool, Dict[str, Any]]:
-        results = result.get("results", [])
+        result: Union[ToolResult, Dict[str, Any]],
+        ctx: ExecutionContext
+    ) -> VerificationOutcome:
+        results = result.get("results", []) if hasattr(result, "get") else []
         passed = len(results) > 0
         evidence = {
             "query": params.get("query"),
             "items_returned": len(results),
             "top_url": results[0].get("url") if results else None
         }
-        return passed, evidence
+        return VerificationOutcome(
+            result="passed" if passed else "failed",
+            evidence=evidence,
+            reason="Search returned results" if passed else "Search returned 0 results"
+        )

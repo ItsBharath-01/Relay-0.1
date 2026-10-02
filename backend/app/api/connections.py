@@ -399,10 +399,7 @@ from fastapi import HTTPException
 class MCPServerRegisterRequest(BaseModel):
     name: str          # Human-readable server name (e.g. "Filesystem Tools")
     url: Optional[str] = None           # Base URL of the MCP server
-    command: Optional[str] = None       # Command for stdio (e.g. "python", "node")
-    args: Optional[List[str]] = None    # Arguments for stdio
-    env: Optional[Dict[str, str]] = None
-    transport: Optional[str] = None    # "streamable_http" | "stdio" | "sse"
+    transport: Optional[str] = "streamable_http"  # Only remote transports allowed from user UI/API
     description: str = ""
 
 @router.post("/mcp/register")
@@ -418,13 +415,18 @@ async def register_mcp_server(
     if not name:
         raise HTTPException(status_code=400, detail="Server name is required.")
 
+    # P0-2: Disallow stdio registration by users over API
+    if req.transport == "stdio":
+        raise HTTPException(
+            status_code=400,
+            detail="Stdio transport is restricted to operator configuration and cannot be registered via user API."
+        )
+
     # Build config payload
     config_dict = {
-        "transport": req.transport,
+        "transport": req.transport or "streamable_http",
         "server_url": req.url,
-        "command": req.command,
-        "args": req.args or [],
-        "env": req.env or {},
+        "user_id": current_user.id,
     }
     try:
         norm_config = parse_mcp_config(config_dict)

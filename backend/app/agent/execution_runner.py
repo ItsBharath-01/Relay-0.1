@@ -19,13 +19,19 @@ from app.models.entities import (
     Verification,
     Connection,
 )
+from app.core.config import settings
 from app.selection.engine import selection_engine
 from app.risk.classifier import risk_classifier
 from app.tools.registry import get_tool
+from app.tools.registry.base import ExecutionContext
 from app.events.manager import event_broadcaster
 from app.connections.resolver import connection_resolver, redact_sensitive_data, ConnectionRevokedError
+from app.security.crypto import hash_payload
 from app.verification.engine import verification_engine
 from app.recovery.engine import recovery_engine
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 class ExecutionRunner:
@@ -34,9 +40,104 @@ class ExecutionRunner:
     real approval gating, and real recovery.
     """
 
+    def __init__(self):
+        self._active_tasks: Dict[str, asyncio.Task] = {}
+        self._lock = asyncio.Lock()
+
+    async def cleanup_orphaned_executions(self):
+        """P0-3: On startup or initialization, fail any executions left stuck in 'running'."""
+        try:
+            async with async_session_maker() as db:
+                stmt = select(Execution).where(Execution.status == "running")
+                res = await db.execute(stmt)
+                stuck = res.scalars().all()
+                for exc in stuck:
+                    exc.status = "failed"
+                    exc.outcome = "FAILED"
+                    exc.outcome_summary = "Execution terminated abruptly due to server restart."
+                    exc.completed_at = datetime.now(timezone.utc)
+                if stuck:
+                    await db.commit()
+                    logger.info(f"Cleaned up {len(stuck)} orphaned running execution(s).")
+        except Exception as e:
+            logger.warning(f"Error cleaning up orphaned executions: {e}")
+
     async def start_execution_background(self, execution_id: str):
-        """Launches the execution state machine in an asynchronous background task."""
-        asyncio.create_task(self.run_execution(execution_id))
+        """
+        P0-3: Launches the execution state machine as a supervised background task.
+        Tracks task reference, applies wall-clock timeout, and registers done callback.
+        """
+        async with self._lock:
+            # If already running, don't double-launch
+            if execution_id in self._active_tasks and not self._active_tasks[execution_id].done():
+                logger.warning(f"Execution {execution_id} is already actively running.")
+                return
+
+            task = asyncio.create_task(
+                self._supervised_execution_wrapper(execution_id),
+                name=f"exec-{execution_id}"
+            )
+            self._active_tasks[execution_id] = task
+
+            def _on_done(t: asyncio.Task):
+                self._active_tasks.pop(execution_id, None)
+                if not t.cancelled():
+                    exc = t.exception()
+                    if exc:
+                        logger.error(f"Execution {execution_id} failed with unhandled exception: {exc}")
+                        # Schedule emergency DB failure update in event loop
+                        asyncio.create_task(self._mark_execution_failed_on_crash(execution_id, str(exc)))
+
+            task.add_done_callback(_on_done)
+
+    async def _mark_execution_failed_on_crash(self, execution_id: str, error_msg: str):
+        """Marks execution and active tasks as failed if unhandled exception escaped."""
+        try:
+            clean_err = redact_sensitive_data(error_msg)
+            async with async_session_maker() as db:
+                stmt = select(Execution).options(selectinload(Execution.plan).selectinload(Plan.tasks)).where(Execution.id == execution_id)
+                res = await db.execute(stmt)
+                execution = res.scalar_one_or_none()
+                if execution and execution.status in ["running", "pending"]:
+                    execution.status = "failed"
+                    execution.outcome = "FAILED"
+                    execution.outcome_summary = f"Execution crashed unexpectedly: {clean_err}"
+                    execution.completed_at = datetime.now(timezone.utc)
+                    if execution.plan and execution.plan.tasks:
+                        for t in execution.plan.tasks:
+                            if t.status == "running":
+                                t.status = "failed"
+                    await db.commit()
+                    await event_broadcaster.emit(
+                        db, execution_id, "execution_failed",
+                        f"Execution crashed: {clean_err}",
+                        payload={"error": clean_err}
+                    )
+        except Exception as e:
+            logger.error(f"Failed to record crash state for execution {execution_id}: {e}")
+
+    async def _supervised_execution_wrapper(self, execution_id: str):
+        """Enforces wall-clock timeout on the execution state machine."""
+        timeout_s = getattr(settings, "EXECUTION_TIMEOUT_SECONDS", 1800)
+        try:
+            await asyncio.wait_for(self.run_execution(execution_id), timeout=float(timeout_s))
+        except asyncio.TimeoutError:
+            logger.error(f"Execution {execution_id} exceeded maximum timeout of {timeout_s}s.")
+            async with async_session_maker() as db:
+                stmt = select(Execution).where(Execution.id == execution_id)
+                res = await db.execute(stmt)
+                exc = res.scalar_one_or_none()
+                if exc and exc.status == "running":
+                    exc.status = "failed"
+                    exc.outcome = "FAILED"
+                    exc.outcome_summary = f"Execution exceeded maximum allowed timeout ({timeout_s}s)."
+                    exc.completed_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    await event_broadcaster.emit(
+                        db, execution_id, "execution_failed",
+                        f"Execution timed out after {timeout_s}s.",
+                        payload={"timeout_seconds": timeout_s}
+                    )
 
     async def run_execution(self, execution_id: str):
         async with async_session_maker() as db:
@@ -54,6 +155,11 @@ class ExecutionRunner:
             execution = res.scalar_one_or_none()
             if not execution:
                 return
+
+            if execution.status == "pending":
+                execution.status = "running"
+                execution.started_at = datetime.now(timezone.utc)
+                await db.commit()
 
             plan = execution.plan
             goal = execution.goal
@@ -398,20 +504,22 @@ class ExecutionRunner:
 
                     # Block execution until approval decision is made
                     approved = False
+                    approval_id = approval.id
                     while True:
-                        await asyncio.sleep(2.0)
-                        await db.refresh(approval)
-                        if approval.status == "approved":
-                            approved = True
-                            break
-                        elif approval.status in ["rejected", "expired"]:
-                            approved = False
-                            break
-                        
-                        # Also check if execution was cancelled while waiting
-                        await db.refresh(execution)
-                        if execution.status == "cancelled":
-                            return
+                        await asyncio.sleep(1.0)
+                        async with async_session_maker() as poll_db:
+                            appr_check = await poll_db.get(Approval, approval_id)
+                            exec_check = await poll_db.get(Execution, execution_id)
+                            if exec_check and exec_check.status == "cancelled":
+                                return
+                            if appr_check and appr_check.status == "approved":
+                                approval = appr_check
+                                approved = True
+                                break
+                            elif appr_check and appr_check.status in ["rejected", "expired"]:
+                                approval = appr_check
+                                approved = False
+                                break
 
                     if not approved:
                         task.status = "rejected"
@@ -467,12 +575,22 @@ class ExecutionRunner:
                 tool_error = None
 
                 try:
+                    ctx = ExecutionContext(
+                        user_id=execution.user_id,
+                        execution_id=execution_id,
+                        task_id=task.id,
+                        connection_id=selected_tool.requires_connection,
+                        credentials=raw_credentials,
+                        idempotency_key=getattr(task, "idempotency_key", None),
+                        approved_payload_hash=getattr(task, "approved_payload_hash", None),
+                    )
                     tool_result = await selected_tool.execute(
                         action=action_name,
                         params=action_params,
-                        credentials=raw_credentials
+                        ctx=ctx
                     )
-                    task.result = tool_result
+                    res_dict = tool_result.to_dict() if hasattr(tool_result, "to_dict") else tool_result
+                    task.result = res_dict
                     await db.commit()
 
                     await event_broadcaster.emit(
@@ -480,7 +598,7 @@ class ExecutionRunner:
                         f"Received real response from {selected_tool.name}.",
                         task_id=task.id,
                         tool_id=selected_tool.id,
-                        payload=tool_result
+                        payload=res_dict
                     )
                 except Exception as e:
                     tool_error = str(e)
@@ -686,16 +804,24 @@ class ExecutionRunner:
 
                             # Execute alternative tool
                             try:
+                                alt_ctx = ExecutionContext(
+                                    user_id=execution.user_id,
+                                    execution_id=execution_id,
+                                    task_id=task.id,
+                                    connection_id=alt_tool.requires_connection,
+                                    credentials=alt_creds,
+                                )
                                 alt_result = await alt_tool.execute(
                                     action=recovery_plan.updated_action or action_name,
                                     params=recovery_plan.updated_params or action_params,
-                                    credentials=alt_creds
+                                    ctx=alt_ctx
                                 )
+                                alt_dict = alt_result.to_dict() if hasattr(alt_result, "to_dict") else alt_result
                                 alt_v = await verification_engine.verify_task_outcome(
                                     capability_id=task.capability_id,
                                     action=recovery_plan.updated_action or action_name,
                                     params=recovery_plan.updated_params or action_params,
-                                    result=alt_result,
+                                    result=alt_dict,
                                     credentials=alt_creds,
                                     tool_id=alt_tool.id
                                 )
@@ -703,7 +829,7 @@ class ExecutionRunner:
                                     recovery.status = "succeeded"
                                     task.status = "completed"
                                     task.selected_tool_id = alt_tool.id
-                                    task.result = alt_result
+                                    task.result = alt_dict
 
                                     # Persist recovery verification entity
                                     v_rec = Verification(

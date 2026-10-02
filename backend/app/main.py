@@ -26,6 +26,13 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing database tables...")
     await init_db()
 
+    # P0-3: Clean up any executions stuck in 'running' across server restarts
+    try:
+        from app.agent.execution_runner import execution_runner
+        await execution_runner.cleanup_orphaned_executions()
+    except Exception as e:
+        logger.warning(f"Startup execution cleanup failed: {e}")
+
     # Re-register tools from active MCP servers on startup
     try:
         from app.core.database import async_session_maker

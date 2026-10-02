@@ -9,7 +9,7 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from app.models.entities import Connection, Permission, Notification
-from app.security.crypto import decrypt_secret, encrypt_secret
+from app.security.crypto import decrypt_secret, encrypt_secret, redact_sensitive_data
 from app.core.config import settings
 
 _REFRESH_LOCKS: Dict[str, asyncio.Lock] = {}
@@ -17,32 +17,6 @@ _REFRESH_LOCKS: Dict[str, asyncio.Lock] = {}
 class ConnectionRevokedError(Exception):
     """Raised when an OAuth refresh token is revoked or permanently invalid."""
     pass
-
-def redact_sensitive_data(data: Any) -> Any:
-    """
-    Central redaction utility that removes secrets, bearer tokens, OAuth refresh tokens,
-    and passwords from logging, exceptions, and event payloads.
-    """
-    if isinstance(data, str):
-        # Redact Google OAuth tokens (ya29.xxx)
-        redacted = re.sub(r"ya29\.[A-Za-z0-9_\-\.]+", "[REDACTED_GOOGLE_TOKEN]", data)
-        # Redact Bearer tokens
-        redacted = re.sub(r"Bearer\s+[A-Za-z0-9_\-\.]+", "Bearer [REDACTED_TOKEN]", redacted)
-        # Redact JWT signatures
-        redacted = re.sub(r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+", "[REDACTED_JWT]", redacted)
-        return redacted
-    elif isinstance(data, dict):
-        clean = {}
-        for k, v in data.items():
-            k_lower = str(k).lower()
-            if any(s in k_lower for s in ["token", "secret", "password", "credential", "refresh_token", "api_key", "authorization"]):
-                clean[k] = "[REDACTED]"
-            else:
-                clean[k] = redact_sensitive_data(v)
-        return clean
-    elif isinstance(data, list):
-        return [redact_sensitive_data(item) for item in data]
-    return data
 
 class ConnectionResolver:
     """

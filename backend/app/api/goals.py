@@ -82,6 +82,8 @@ async def understand_goal(
         if current_user and response.goal_id:
             existing = await db.get(Goal, response.goal_id)
             if existing:
+                if existing.user_id != current_user.id:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to goal.")
                 existing.understanding = response.understanding.model_dump()
                 existing.status = "understood"
             else:

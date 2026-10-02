@@ -1,7 +1,7 @@
-import app.tools.registry
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from app.tools.adapters.slack import SlackTool
+from app.tools.registry.base import ExecutionContext
 
 pytestmark = pytest.mark.asyncio
 
@@ -27,10 +27,10 @@ async def test_slack_message_send_success():
         res = await tool.execute(
             "message_send",
             {"channel": "general", "text": "Hello world!"},
-            credentials={"access_token": "xoxb-fake"},
+            ctx=ExecutionContext(credentials={"access_token": "xoxb-fake"}),
         )
-    assert "error" not in res, str(res)
-    assert res["status"] == "success"
+    assert not res.error, str(res.error)
+    assert res.status == "success"
     assert res["channel"] == "C12345"
     call_kwargs = mock_client.post.call_args.kwargs
     assert call_kwargs["headers"]["Authorization"] == "Bearer xoxb-fake"
@@ -39,15 +39,23 @@ async def test_slack_message_send_success():
 
 async def test_slack_missing_credentials():
     tool = SlackTool()
-    res = await tool.execute("message_send", {"channel": "general", "text": "hi"}, credentials=None)
-    assert "error" in res
+    res = await tool.execute(
+        "message_send",
+        {"channel": "general", "text": "hi"},
+        ctx=ExecutionContext(credentials=None)
+    )
+    assert res.status == "error"
 
 
 async def test_slack_missing_params():
     tool = SlackTool()
-    res = await tool.execute("message_send", {"text": "no channel"}, credentials="xoxb-fake")
-    assert "error" in res
-    assert "channel" in res["error"].lower()
+    res = await tool.execute(
+        "message_send",
+        {"text": "no channel"},
+        ctx=ExecutionContext(credentials="xoxb-fake")
+    )
+    assert res.status == "error"
+    assert "channel" in res.error.lower()
 
 
 async def test_slack_api_error():
@@ -58,7 +66,7 @@ async def test_slack_api_error():
         res = await tool.execute(
             "message_send",
             {"channel": "nonexistent", "text": "hi"},
-            credentials="xoxb-fake",
+            ctx=ExecutionContext(credentials="xoxb-fake"),
         )
-    assert "error" in res
-    assert "channel_not_found" in res["error"]
+    assert res.status == "error"
+    assert "channel_not_found" in res.error

@@ -14,12 +14,20 @@ import json
 import logging
 import re
 import uuid
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
 
 import httpx
 import jsonschema
 
-from app.tools.registry.base import BaseTool
+from app.tools.registry.base import (
+    BaseTool,
+    ActionSpec,
+    EffectClass,
+    ExecutionContext,
+    ToolResult,
+    VerificationOutcome,
+    normalize_execution_context,
+)
 from app.tools.registry.capabilities import Capability, register_capability, get_capability
 from app.tools.adapters.mcp_client import mcp_client, parse_mcp_config
 
@@ -153,19 +161,31 @@ class DynamicMCPTool(BaseTool):
         self.description = description
         self.input_schema = input_schema or {}
         
-        # Build provided capabilities
+        # Build provided capabilities (no legacy search<->read aliasing)
         prov_set = set(provides or [capability_id])
         prov_set.add(capability_id)
-        if capability_id.endswith("_search"):
-            prov_set.add(capability_id.replace("_search", "_read"))
-        elif capability_id.endswith("_read"):
-            prov_set.add(capability_id.replace("_read", "_search"))
         self.provides = list(prov_set)
         self.capability_id = capability_id
         self.tool_type = "mcp"
         self.risk_profile = risk_profile
         self.requires_connection = connection_id
         self.required_permissions = required_permissions or ["call_tools"]
+
+    def describe_actions(self) -> List[ActionSpec]:
+        effect = EffectClass.READ_ONLY if ("read" in self.capability_id or "search" in self.capability_id) else EffectClass.NON_IDEMPOTENT_WRITE
+        schema = self.input_schema if (self.input_schema and isinstance(self.input_schema, dict)) else {"type": "object"}
+        return [
+            ActionSpec(
+                action=self.tool_name,
+                capability_id=self.capability_id,
+                effect_class=effect,
+                reversible=False,
+                target_param=None,
+                required_permission=self.required_permissions[0] if self.required_permissions else None,
+                param_schema=schema,
+                supports_idempotency_key=True
+            )
+        ]
 
     def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Validates arguments against the MCP tool's JSON Schema."""
@@ -187,48 +207,73 @@ class DynamicMCPTool(BaseTool):
         self,
         action: str,
         params: Dict[str, Any],
-        credentials: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+        ctx: ExecutionContext
+    ) -> ToolResult:
         """Executes the specific tool against the MCP server."""
         valid, err = self.validate_params(params)
         if not valid:
             raise ValueError(err)
 
+        credentials = ctx.credentials if ctx else None
         res = await mcp_client.call_tool(credentials, self.tool_name, params)
-        return {
+        is_error = res.get("is_error", False)
+        raw_text = res.get("raw_text", "")
+        data = res.get("data")
+        content = res.get("content", [])
+        
+        err_msg = res.get("error") or (raw_text if is_error else None)
+        out_data = {
             "tool_id": self.id,
             "tool_name": self.tool_name,
             "server_name": self.server_name,
             "capability": self.capability_id,
-            "raw_text": res.get("raw_text", ""),
-            "data": res.get("data"),
-            "content": res.get("content", []),
-            "is_error": res.get("is_error", False),
+            "raw_text": raw_text,
+            "data": data,
+            "content": content,
+            "is_error": is_error,
             "session_id": res.get("session_id"),
         }
+        
+        external_ids = []
+        if isinstance(data, dict):
+            for k in ["id", "note_id", "item_id"]:
+                if k in data:
+                    external_ids.append(str(data[k]))
+
+        return ToolResult(
+            status="error" if is_error else "success",
+            data=out_data,
+            error=err_msg if is_error else None,
+            side_effect_state="CONFIRMED" if not is_error else "UNCERTAIN",
+            external_ids=external_ids
+        )
 
     async def verify(
         self,
         action: str,
         params: Dict[str, Any],
-        result: Dict[str, Any],
-        credentials: Optional[Any] = None,
-    ) -> Tuple[bool, Dict[str, Any]]:
+        result: Union[ToolResult, Dict[str, Any]],
+        ctx: Optional[ExecutionContext] = None
+    ) -> VerificationOutcome:
+        ctx = normalize_execution_context(ctx)
         """
         Capability-aware verification:
         Checks actual result semantics rather than HTTP 200 or raw payload existence.
         """
         is_error = result.get("is_error", False)
         if is_error:
-            return False, {
-                "error": "MCP server returned is_error=True",
-                "tool_name": self.tool_name,
-                "capability": self.capability_id,
-            }
+            return VerificationOutcome(
+                result="failed",
+                evidence={
+                    "error": "MCP server returned is_error=True",
+                    "tool_name": self.tool_name,
+                    "capability": self.capability_id,
+                },
+                reason="MCP server reported tool error"
+            )
 
         raw_text = result.get("raw_text", "")
         data = result.get("data")
-        content = result.get("content", [])
 
         if "create" in self.capability_id:
             has_id = (
@@ -240,7 +285,11 @@ class DynamicMCPTool(BaseTool):
                 "created_confirmation": has_id,
                 "output_preview": raw_text[:200],
             }
-            return has_id, evidence
+            return VerificationOutcome(
+                result="passed" if has_id else "failed",
+                evidence=evidence,
+                reason="Creation confirmed" if has_id else "Creation unconfirmed"
+            )
 
         elif "search" in self.capability_id or "read" in self.capability_id:
             parsed_res = None
@@ -268,7 +317,11 @@ class DynamicMCPTool(BaseTool):
                 "has_data": has_results,
                 "output_preview": raw_text[:200],
             }
-            return has_results, evidence
+            return VerificationOutcome(
+                result="passed" if has_results else "failed",
+                evidence=evidence,
+                reason="Search returned data" if has_results else "No search results found"
+            )
 
         elif "delete" in self.capability_id:
             evidence = {
@@ -277,16 +330,25 @@ class DynamicMCPTool(BaseTool):
                 "deleted": True,
                 "output_preview": raw_text[:200],
             }
-            return bool(raw_text), evidence
+            has_del = bool(raw_text)
+            return VerificationOutcome(
+                result="passed" if has_del else "failed",
+                evidence=evidence,
+                reason="Deletion confirmed" if has_del else "Deletion confirmation missing"
+            )
 
         # Generic verification
-        passed = bool(raw_text or data or content)
-        return passed, {
-            "tool_name": self.tool_name,
-            "capability": self.capability_id,
-            "raw_text_length": len(raw_text),
-            "output_preview": raw_text[:200],
-        }
+        passed = bool(raw_text or data or result.get("content"))
+        return VerificationOutcome(
+            result="passed" if passed else "failed",
+            evidence={
+                "tool_name": self.tool_name,
+                "capability": self.capability_id,
+                "raw_text_length": len(raw_text),
+                "output_preview": raw_text[:200],
+            },
+            reason="MCP output observed" if passed else "Empty output observed"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -464,6 +526,27 @@ class MCPToolAdapter(BaseTool):
     requires_connection = "mcp"
     required_permissions = ["call_tools"]
 
+    def describe_actions(self) -> List[ActionSpec]:
+        return [
+            ActionSpec(
+                action="call_tool",
+                capability_id="mcp_call",
+                effect_class=EffectClass.NON_IDEMPOTENT_WRITE,
+                reversible=False,
+                target_param="tool_name",
+                required_permission="call_tools",
+                param_schema={
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {"type": "string", "description": "MCP tool name"},
+                        "arguments": {"type": "object", "description": "Tool parameters"}
+                    },
+                    "required": ["tool_name"]
+                },
+                supports_idempotency_key=True
+            )
+        ]
+
     async def health_check(self, credentials: Optional[Any] = None) -> Tuple[bool, Optional[str]]:
         if not credentials:
             return False, "MCP server URL is not configured."
@@ -518,13 +601,14 @@ class MCPToolAdapter(BaseTool):
         self,
         action: str,
         params: Dict[str, Any],
-        credentials: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+        ctx: ExecutionContext
+    ) -> ToolResult:
         tool_name = params.get("tool_name") or action
         arguments = params.get("arguments", {})
         if not isinstance(arguments, dict):
             arguments = {}
 
+        credentials = ctx.credentials if ctx else None
         if isinstance(credentials, str) or (isinstance(credentials, dict) and "access_token" in credentials and "transport" not in credentials):
             server_url = credentials.get("access_token", "") if isinstance(credentials, dict) else str(credentials)
             server_url = server_url.rstrip("/")
@@ -537,31 +621,50 @@ class MCPToolAdapter(BaseTool):
             content = raw_result.get("content", [])
             text_output = _extract_text_content(content)
             is_error = raw_result.get("isError", False)
-            return {
+            out_data = {
                 "tool_name": tool_name,
                 "arguments": safe_args,
                 "content": content,
                 "raw_text": text_output[:MAX_CONTENT_CHARS],
                 "is_error": is_error,
             }
+            return ToolResult(
+                status="error" if is_error else "success",
+                data=out_data,
+                error=text_output if is_error else None,
+                side_effect_state="CONFIRMED" if not is_error else "UNCERTAIN"
+            )
 
         from app.tools.adapters.mcp_client import mcp_client
-        return await mcp_client.call_tool(credentials, tool_name, arguments)
+        res = await mcp_client.call_tool(credentials, tool_name, arguments)
+        is_error = res.get("is_error", False)
+        return ToolResult(
+            status="error" if is_error else "success",
+            data=res,
+            error=res.get("error") or (res.get("raw_text") if is_error else None),
+            side_effect_state="CONFIRMED" if not is_error else "UNCERTAIN"
+        )
 
     async def verify(
         self,
         action: str,
         params: Dict[str, Any],
-        result: Dict[str, Any],
-        credentials: Optional[Any] = None,
-    ) -> Tuple[bool, Dict[str, Any]]:
+        result: Union[ToolResult, Dict[str, Any]],
+        ctx: Optional[ExecutionContext] = None
+    ) -> VerificationOutcome:
+        ctx = normalize_execution_context(ctx)
         is_error = result.get("is_error", False)
         raw_text = result.get("raw_text", "")
-        return (not is_error and bool(raw_text)), {
-            "output_chars": len(raw_text),
-            "is_error": is_error,
-            "output_preview": raw_text[:200],
-        }
+        passed = (not is_error and bool(raw_text))
+        return VerificationOutcome(
+            result="passed" if passed else "failed",
+            evidence={
+                "output_chars": len(raw_text),
+                "is_error": is_error,
+                "output_preview": raw_text[:200],
+            },
+            reason="Output observed" if passed else "Error or empty output from MCP"
+        )
 
     async def list_tools(self, credentials: Any) -> List[Dict[str, Any]]:
         if isinstance(credentials, str) and not credentials.startswith("{"):
