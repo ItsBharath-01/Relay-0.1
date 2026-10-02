@@ -16,15 +16,22 @@ env/
 .venv/
 .env/
 
-# Local environment files (may contain secrets)
+# Environment files
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+.dev-secrets.json
+backend/.dev-secrets.json
 backend/.env
 
-# Runtime databases (not for version control)
+# Databases & runtime state
+*.db
+*.sqlite*
+*.db-journal
 backend/*.db
 backend/relay.db
+workspace/
+backend/workspace/
 
 # Scratch/temp test files
 backend/test_*.py
@@ -60,7 +67,7 @@ logs/
 .coverage
 htmlcov/
 
-# Secrets / keys (belt-and-suspenders)
+# Secrets / keys
 *.pem
 *.key
 *.p12
