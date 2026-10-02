@@ -95,13 +95,28 @@ class Settings(BaseSettings):
     )
 
     # LLM Settings (Ollama-first, local by default)
-    LLM_PROVIDER: str = Field(default="ollama", description="ollama | gemini | openai | anthropic")
-    OLLAMA_BASE_URL: str = Field(default="http://localhost:11434")
-    OLLAMA_MODEL: str = Field(default="qwen3:4b")
+  # LLM Settings
+    LLM_PROVIDER: str = Field(
+    default="ollama",
+    description="ollama | gemini | openai | anthropic"
+)
+
+    OLLAMA_BASE_URL: str = Field(
+    default="http://localhost:11434"
+)
+
+    OLLAMA_API_KEY: Optional[str] = Field(
+    default=None,
+    description="Ollama Cloud API key; not required for local Ollama"
+)
+
+    OLLAMA_MODEL: str = Field(
+    default="qwen3:4b"
+)
+
     OLLAMA_NUM_CTX: int = Field(default=8192)
     OLLAMA_TIMEOUT: float = Field(default=300.0)
     OLLAMA_MAX_RETRIES: int = Field(default=3)
-
     # Hosted LLM API Keys (optional; never required for local Ollama)
     GEMINI_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None

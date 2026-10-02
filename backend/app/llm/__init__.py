@@ -33,6 +33,7 @@ def get_llm_provider() -> LLMProvider:
             num_ctx=settings.OLLAMA_NUM_CTX,
             timeout=settings.OLLAMA_TIMEOUT,
             max_retries=settings.OLLAMA_MAX_RETRIES,
+            api_key=settings.OLLAMA_API_KEY,
         )
     elif provider_type == "gemini":
         if not settings.GEMINI_API_KEY:
